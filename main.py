@@ -14,8 +14,17 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # напр. @hodakov_digital або -100...
 LOG_FILE = "posts_log.json"
 INSIGHTS_FILE = "style_insights.json"
+TELEGRAM_LOG_FILE = "telegram_log.json"
+
+# Типи постів які вважаються "експертними" — саме вони дублюються
+# розширеною версією в Telegram і отримують CTA в кінці Threads-поста
+EXPERT_TYPES = {"value_tip", "ai_dev", "developer_pain"}
+
+TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hodakov_digital"
 
 # ===== КОНТЕНТ ПЛАН =====
 CONTENT_PILLARS = [
@@ -270,6 +279,94 @@ def generate_post():
     return text, pillar["type"]
 
 
+# ===== TELEGRAM (кросспост експертних постів) =====
+def generate_telegram_post(threads_text, pillar_type):
+    """Розширює короткий експертний Threads-пост у повноцінний Telegram-пост."""
+    system_prompt = """Ти пишеш пост для Telegram каналу Богдана Ходакова (@hodakov_digital),
+розробника сайтів і додатків. Це той самий канал куди Богдан веде людей з Threads.
+
+Тобі дають короткий пост з Threads. Розпиши цю саму думку ширше і конкретніше:
+додай реальний приклад, конкретну деталь або крок, який людина може забрати собі.
+Це має відчуватись як продовження думки, а не переказ того самого поста.
+
+ЖОРСТКО ЗАБОРОНЕНО:
+- Тире як пунктуація
+- Слова: критично, важливо, ключовий, унікальний, рішення, підхід, результат, онлайн-присутність
+- Списки
+- Хештеги
+- Емодзі
+- Повчальні висновки в кінці
+
+СТИЛЬ: коротко, від першої особи, як звичайна людина думає вголос."""
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=500,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Ось пост з Threads:\n\n{threads_text}"}
+        ]
+    )
+    return response.choices[0].message.content.strip()
+
+
+def publish_to_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        print("Telegram не налаштований (немає TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL_ID) — пропускаю")
+        return None
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    params = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": text
+    }
+    response = requests.post(url, params=params)
+    data = response.json()
+    if not data.get("ok"):
+        raise Exception(f"Помилка публікації в Telegram: {data}")
+    return data["result"]["message_id"]
+
+
+def load_telegram_log():
+    if os.path.exists(TELEGRAM_LOG_FILE):
+        with open(TELEGRAM_LOG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_telegram_log(posts):
+    with open(TELEGRAM_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(posts, f, ensure_ascii=False, indent=2)
+
+
+def crosspost_to_telegram(threads_text, pillar_type):
+    """Якщо пост експертного типу — генерує розширену версію і публікує в Telegram."""
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    try:
+        tg_text = generate_telegram_post(threads_text, pillar_type)
+        print(f"\nTelegram-пост (тип {pillar_type}):\n{'-'*40}\n{tg_text}\n{'-'*40}")
+        message_id = publish_to_telegram(tg_text)
+
+        posts = load_telegram_log()
+        posts.append({
+            "timestamp": timestamp,
+            "type": pillar_type,
+            "text": tg_text,
+            "message_id": message_id,
+            "status": "published" if message_id else "skipped"
+        })
+        save_telegram_log(posts)
+        if message_id:
+            print(f"Опубліковано в Telegram! ID: {message_id}")
+
+    except Exception as e:
+        print(f"Помилка Telegram: {e}")
+        posts = load_telegram_log()
+        posts.append({"timestamp": timestamp, "type": pillar_type, "status": "error", "error": str(e)})
+        save_telegram_log(posts)
+
+
 # ===== ПУБЛІКАЦІЯ =====
 def create_threads_container(text):
     url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
@@ -304,10 +401,13 @@ def post_to_threads():
 
     try:
         text, pillar_type = generate_post()
-        print(f"Тип: {pillar_type}")
-        print(f"Текст:\n{'-'*40}\n{text}\n{'-'*40}")
+        is_expert = pillar_type in EXPERT_TYPES
+        published_text = text + TELEGRAM_CTA if is_expert else text
 
-        creation_id = create_threads_container(text)
+        print(f"Тип: {pillar_type} {'(експертний → CTA + Telegram)' if is_expert else ''}")
+        print(f"Текст:\n{'-'*40}\n{published_text}\n{'-'*40}")
+
+        creation_id = create_threads_container(published_text)
         time.sleep(30)
         post_id = publish_threads_post(creation_id)
 
@@ -315,12 +415,15 @@ def post_to_threads():
         posts.append({
             "timestamp": timestamp,
             "type": pillar_type,
-            "text": text,
+            "text": published_text,
             "post_id": post_id,
             "status": "published"
         })
         save_log(posts)
         print(f"Опубліковано! ID: {post_id}")
+
+        if is_expert:
+            crosspost_to_telegram(text, pillar_type)
 
     except Exception as e:
         print(f"Помилка: {e}")
