@@ -5,6 +5,7 @@ import time
 import random
 import os
 import json
+import hashlib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -25,6 +26,42 @@ TELEGRAM_LOG_FILE = "telegram_log.json"
 EXPERT_TYPES = {"value_tip", "ai_dev", "developer_pain"}
 
 TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hodakov_digital"
+
+# ===== ПОШУК ЛІДІВ І САМОРЕКЛАМИ (обхід через Google, поки нема App Review Meta) =====
+GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
+TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
+
+SEEN_LEADS_FILE = "seen_leads.json"
+SEEN_SELFPROMO_FILE = "seen_selfpromo.json"
+PENDING_REPLIES_FILE = "pending_replies.json"
+TELEGRAM_OFFSET_FILE = "telegram_offset.json"
+REPLY_TEMPLATE_STATE_FILE = "reply_template_state.json"
+
+LEAD_KEYWORDS = [
+    "потрібен розробник сайту",
+    "шукаю розробника сайту",
+    "вакансія розробник сайту",
+    "нужен разработчик сайта",
+    "ищу разработчика сайта",
+    "looking for a web developer",
+]
+
+SELFPROMO_KEYWORDS = [
+    "роблю сайти",
+    "розробляю сайти під ключ",
+    "дизайн і розробка сайту",
+    "делаю сайты под ключ",
+    "web developer for hire",
+]
+
+# Готові відповіді під саморекламні тредси. Чергуються по колу — GPT тут не викликається,
+# щоб не палити токени на кожен збіг.
+REPLY_TEMPLATES = [
+    "Роблю такі сайти під ключ за тиждень, з дизайном і кодом одразу. Можу показати приклади якщо цікаво.",
+    "У мене якраз професія на цьому. Роблю сайт від дизайну до запуску за 5-7 днів, без місяців очікування.",
+    "Бачив подібні запити раніше. Роблю сайти сам, від макету до сервера, швидко і без посередників.",
+]
 
 # ===== КОНТЕНТ ПЛАН =====
 CONTENT_PILLARS = [
@@ -439,11 +476,221 @@ def daily_maintenance():
     analyze_and_learn()
 
 
+# ===== JSON ХЕЛПЕРИ =====
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ===== TELEGRAM DM (сповіщення власнику, не канал) =====
+def send_telegram_dm(text, reply_markup=None):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_USER_CHAT_ID:
+        print("Telegram DM не налаштований (TELEGRAM_BOT_TOKEN / TELEGRAM_USER_CHAT_ID)")
+        return None
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_USER_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+
+    try:
+        response = requests.post(url, data=payload)
+        data = response.json()
+        if not data.get("ok"):
+            print(f"Помилка Telegram DM: {data}")
+            return None
+        return data["result"]["message_id"]
+    except Exception as e:
+        print(f"Помилка Telegram DM: {e}")
+        return None
+
+
+def answer_callback_query(callback_id, text=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    params = {"callback_query_id": callback_id}
+    if text:
+        params["text"] = text
+    try:
+        requests.post(url, params=params)
+    except Exception:
+        pass
+
+
+# ===== ПОШУК ЛІДІВ І САМОРЕКЛАМИ ЧЕРЕЗ GOOGLE =====
+def google_search(query, num=10):
+    """Пошук по публічному Google-індексу threads.net.
+    Тимчасовий обхід поки не схвалено App Review на threads_keyword_search в Meta —
+    після схвалення треба замінити на офіційний /keyword_search ендпоінт Threads API."""
+    if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX:
+        print("Google Search не налаштований (GOOGLE_SEARCH_API_KEY / GOOGLE_SEARCH_CX)")
+        return []
+
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_SEARCH_API_KEY,
+        "cx": GOOGLE_SEARCH_CX,
+        "q": query,
+        "num": num
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    return data.get("items", [])
+
+
+def build_or_query(keywords):
+    quoted = " OR ".join(f'"{k}"' for k in keywords)
+    return f"site:threads.net ({quoted})"
+
+
+def get_next_template():
+    state = load_json(REPLY_TEMPLATE_STATE_FILE, {"index": 0})
+    idx = state["index"] % len(REPLY_TEMPLATES)
+    template = REPLY_TEMPLATES[idx]
+    state["index"] = idx + 1
+    save_json(REPLY_TEMPLATE_STATE_FILE, state)
+    return template
+
+
+def search_leads():
+    """Шукає тредси де хтось пише що потрібен розробник сайту / відкрита вакансія.
+    Тільки сповіщення в Telegram, без автовідповіді — відповідати треба самому і швидко."""
+    seen = load_json(SEEN_LEADS_FILE, [])
+    query = build_or_query(LEAD_KEYWORDS)
+
+    try:
+        items = google_search(query)
+    except Exception as e:
+        print(f"Помилка пошуку лідів: {e}")
+        return
+
+    new_seen = seen[:]
+    for item in items:
+        link = item.get("link")
+        if not link or link in seen:
+            continue
+
+        snippet = item.get("snippet", "")
+        message = (
+            f"Можливий клієнт на Threads\n\n"
+            f"{snippet}\n\n"
+            f"{link}\n\n"
+            f"Відповідай сам і швидко, поки тред живий."
+        )
+        send_telegram_dm(message)
+        new_seen.append(link)
+
+    if new_seen != seen:
+        save_json(SEEN_LEADS_FILE, new_seen)
+
+
+def search_selfpromo():
+    """Шукає тредси де хтось постить свої послуги розробки сайтів.
+    Готує чергову шаблонну відповідь і шле в Telegram на підтвердження —
+    ніякої автопублікації без дозволу власника."""
+    seen = load_json(SEEN_SELFPROMO_FILE, [])
+    pending = load_json(PENDING_REPLIES_FILE, {})
+    query = build_or_query(SELFPROMO_KEYWORDS)
+
+    try:
+        items = google_search(query)
+    except Exception as e:
+        print(f"Помилка пошуку самореклами: {e}")
+        return
+
+    new_seen = seen[:]
+    for item in items:
+        link = item.get("link")
+        if not link or link in seen:
+            continue
+
+        snippet = item.get("snippet", "")
+        template = get_next_template()
+        short_id = hashlib.md5(link.encode()).hexdigest()[:10]
+        pending[short_id] = {"link": link, "reply": template}
+
+        message = (
+            f"Тред з саморекламою послуг\n\n"
+            f"{snippet}\n\n"
+            f"{link}\n\n"
+            f"Готова відповідь (тапни щоб скопіювати і встав в Threads):\n"
+            f"<code>{template}</code>"
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "Відправлено", "callback_data": f"done:{short_id}"},
+                {"text": "Пропустити", "callback_data": f"skip:{short_id}"}
+            ]]
+        }
+        send_telegram_dm(message, reply_markup=keyboard)
+        new_seen.append(link)
+
+    if new_seen != seen:
+        save_json(SEEN_SELFPROMO_FILE, new_seen)
+    save_json(PENDING_REPLIES_FILE, pending)
+
+
+def poll_telegram_updates():
+    """Перевіряє натискання кнопок Відправлено/Пропустити і прибирає їх з pending."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+
+    offset_data = load_json(TELEGRAM_OFFSET_FILE, {"offset": 0})
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    params = {"offset": offset_data["offset"], "timeout": 0}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+    except Exception as e:
+        print(f"Помилка отримання Telegram updates: {e}")
+        return
+
+    if not data.get("ok"):
+        return
+
+    pending = load_json(PENDING_REPLIES_FILE, {})
+    max_update_id = offset_data["offset"] - 1
+
+    for update in data.get("result", []):
+        max_update_id = max(max_update_id, update["update_id"])
+        callback = update.get("callback_query")
+        if not callback:
+            continue
+
+        data_str = callback.get("data", "")
+        callback_id = callback["id"]
+
+        if ":" not in data_str:
+            continue
+
+        action, short_id = data_str.split(":", 1)
+        if short_id in pending:
+            pending.pop(short_id, None)
+            answer_text = "Відмічено як відправлене" if action == "done" else "Пропущено"
+        else:
+            answer_text = "Вже оброблено"
+
+        answer_callback_query(callback_id, answer_text)
+
+    save_json(PENDING_REPLIES_FILE, pending)
+    save_json(TELEGRAM_OFFSET_FILE, {"offset": max_update_id + 1})
+
+
 # ===== РОЗКЛАД =====
 schedule.every().day.at("06:00").do(post_to_threads)   # 09:00 Київ
 schedule.every().day.at("10:30").do(post_to_threads)   # 13:30 Київ
 schedule.every().day.at("16:00").do(post_to_threads)   # 19:00 Київ
 schedule.every(4).hours.do(daily_maintenance)          # аналіз кожні 4 години
+schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
+schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
+schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка натискань кнопок
 
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
