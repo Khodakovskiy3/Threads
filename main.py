@@ -1,0 +1,194 @@
+from openai import OpenAI
+import requests
+import schedule
+import time
+import random
+import os
+import json
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ===== КОНФІГ =====
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
+THREADS_USER_ID = os.getenv("THREADS_USER_ID")
+LOG_FILE = "posts_log.json"
+
+# ===== КОНТЕНТ ПЛАН =====
+CONTENT_PILLARS = [
+    {
+        "type": "storytelling_client",
+        "prompt": """Напиши короткий смішний або впізнаваний момент з роботи розробника сайтів.
+Обов'язково — ситуація з клієнтом. Щось що зрозуміє будь-яка людина навіть далека від IT.
+Наприклад: клієнт просить 'зроби красиво', 'як в Apple але дешевше', або кидає проект і повертається.
+Від першої особи. Без повчань і висновків в кінці."""
+    },
+    {
+        "type": "observation_business",
+        "prompt": """Напиши коротке спостереження про малий бізнес і сайти або онлайн присутність.
+Щось що змусить власника кав'ярні, салону або курсів впізнати свою ситуацію.
+Без реклами. Просто як 'це про мене' момент."""
+    },
+    {
+        "type": "question_engagement",
+        "prompt": """Напиши одне просте питання для людей які мають або планують бізнес.
+Про сайт, про довіру клієнтів, про те як вони шукають послуги в інтернеті.
+Питання має бути таке що хочеться відповісти в коментарі."""
+    },
+    {
+        "type": "developer_pain",
+        "prompt": """Напиши пост про типову ситуацію яка стається між клієнтом і розробником.
+Розробник кинув проект, тягнув місяцями, зробив не те. Від сторони людини яка це бачила.
+Без злості, просто як факт. Коротко."""
+    },
+    {
+        "type": "ai_dev",
+        "prompt": """Напиши пост про те як AI змінює розробку сайтів і що це означає для клієнтів.
+Не технічно, а людською мовою. Типу 'раніше на це йшов місяць, тепер тиждень'.
+Без хайпу, без 'революція'. Просто факт з роботи."""
+    },
+    {
+        "type": "value_tip",
+        "prompt": """Напиши один конкретний тіп для власника малого бізнесу.
+Про сайт або онлайн присутність. Щось що можна перевірити або зробити прямо зараз.
+Коротко. Без вступу типу 'сьогодні розкажу'."""
+    }
+]
+
+SYSTEM_PROMPT = """Ти пишеш пости для Threads від імені Богдана Ходакова (@hodakov.digital).
+Богдан розробляє сайти і додатки з AI. Робить сайти за 5-7 днів, від дизайну до запуску.
+
+ГОЛОС:
+- Від першої особи, по-українськи, розмовно
+- Коротко: 4-7 речень максимум
+- Різна довжина речень: коротке. Трохи довше. Знову коротке
+- Без пафосу і мотиваційних фраз
+
+ЖОРСТКО ЗАБОРОНЕНО:
+- Тире як пунктуація (замість — використовуй кому або крапку)
+- Списки через тире або цифри
+- Слова: ключовий, важливий, унікальний, рішення, підхід, результат, підкреслює, сприяє
+- "Не X, а Y" конструкції
+- Емодзі в кінці речень
+- Хештеги
+- Заклики підписатись, писати в директ, переходити за посиланням
+- "Підсумовуючи", "загалом", "таким чином"
+- Повчальні висновки в кінці
+
+ПИШИ ЯК: звичайна людина ділиться думкою або моментом. Не маркетолог."""
+
+
+def load_log():
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_log(posts):
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(posts, f, ensure_ascii=False, indent=2)
+
+
+def generate_post():
+    pillar = random.choice(CONTENT_PILLARS)
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=400,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": pillar["prompt"]}
+        ]
+    )
+
+    text = response.choices[0].message.content.strip()
+    return text, pillar["type"]
+
+
+def create_threads_container(text):
+    url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+    params = {
+        "media_type": "TEXT",
+        "text": text,
+        "access_token": THREADS_ACCESS_TOKEN
+    }
+    response = requests.post(url, params=params)
+    data = response.json()
+
+    if "id" not in data:
+        raise Exception(f"Помилка створення: {data}")
+    return data["id"]
+
+
+def publish_threads_post(creation_id):
+    url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
+    params = {
+        "creation_id": creation_id,
+        "access_token": THREADS_ACCESS_TOKEN
+    }
+    response = requests.post(url, params=params)
+    data = response.json()
+
+    if "id" not in data:
+        raise Exception(f"Помилка публікації: {data}")
+    return data["id"]
+
+
+def post_to_threads():
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    print(f"\n[{timestamp}] Генерую пост...")
+
+    try:
+        text, pillar_type = generate_post()
+        print(f"Тип: {pillar_type}")
+        print(f"Текст:\n{'-'*40}\n{text}\n{'-'*40}")
+
+        creation_id = create_threads_container(text)
+        time.sleep(30)  # Threads вимагає паузу перед публікацією
+        post_id = publish_threads_post(creation_id)
+
+        log_entry = {
+            "timestamp": timestamp,
+            "type": pillar_type,
+            "text": text,
+            "post_id": post_id,
+            "status": "published"
+        }
+
+        posts = load_log()
+        posts.append(log_entry)
+        save_log(posts)
+
+        print(f"Опубліковано! ID: {post_id}")
+
+    except Exception as e:
+        print(f"Помилка: {e}")
+        log_entry = {
+            "timestamp": timestamp,
+            "status": "error",
+            "error": str(e)
+        }
+        posts = load_log()
+        posts.append(log_entry)
+        save_log(posts)
+
+
+# ===== РОЗКЛАД: 3 пости на день (UTC+3 Київ) =====
+# Railway сервер на UTC, тому віднімаємо 3 години
+schedule.every().day.at("06:00").do(post_to_threads)  # 09:00 Київ
+schedule.every().day.at("10:30").do(post_to_threads)  # 13:30 Київ
+schedule.every().day.at("16:00").do(post_to_threads)  # 19:00 Київ
+
+if __name__ == "__main__":
+    print("Threads AutoPoster — hodakov.digital")
+    print("Розклад: 09:00 / 13:30 / 19:00")
+    print("Перший пост зараз...")
+    post_to_threads()
+
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
