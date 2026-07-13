@@ -432,8 +432,27 @@ def publish_threads_post(creation_id):
     return data["id"]
 
 
+MIN_HOURS_BETWEEN_POSTS = 4  # захист від дублів при рестарті/паралельному деплої
+
+
+def hours_since_last_post():
+    posts = [p for p in load_log() if p.get("status") == "published" and p.get("timestamp")]
+    if not posts:
+        return None
+    last = max(posts, key=lambda p: datetime.strptime(p["timestamp"], "%d.%m.%Y %H:%M"))
+    last_time = datetime.strptime(last["timestamp"], "%d.%m.%Y %H:%M")
+    return (datetime.now() - last_time).total_seconds() / 3600
+
+
 def post_to_threads():
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    hours_since = hours_since_last_post()
+    if hours_since is not None and hours_since < MIN_HOURS_BETWEEN_POSTS:
+        print(f"\n[{timestamp}] Останній пост був {hours_since:.1f} год тому — "
+              f"пропускаю, щоб не постити частіше ніж раз на {MIN_HOURS_BETWEEN_POSTS} год")
+        return
+
     print(f"\n[{timestamp}] Генерую пост...")
 
     try:
@@ -684,9 +703,7 @@ def poll_telegram_updates():
 
 
 # ===== РОЗКЛАД =====
-schedule.every().day.at("06:00").do(post_to_threads)   # 09:00 Київ
-schedule.every().day.at("10:30").do(post_to_threads)   # 13:30 Київ
-schedule.every().day.at("16:00").do(post_to_threads)   # 19:00 Київ
+schedule.every(4).hours.do(post_to_threads)            # 1 пост кожні 4 години (захист від бану за спам)
 schedule.every(4).hours.do(daily_maintenance)          # аналіз кожні 4 години
 schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
@@ -694,9 +711,8 @@ schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка на
 
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
-    print("Розклад: 09:00 / 13:30 / 19:00 (Київ)")
-    print("Аналіз: щодня о 06:00")
-    print("Перший пост зараз...")
+    print(f"Розклад: 1 пост кожні {MIN_HOURS_BETWEEN_POSTS} години")
+    print("Перевірка при старті (пропускається якщо останній пост був недавно)...")
     post_to_threads()
 
     while True:
