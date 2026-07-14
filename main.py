@@ -46,6 +46,8 @@ TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hoda
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
+DASHBOARD_URL = os.getenv("DASHBOARD_URL")    # публічний домен сервісу dashboard.py на Railway
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")  # той самий токен що і в dashboard.py
 
 SEEN_LEADS_FILE = data_path("seen_leads.json")
 SEEN_SELFPROMO_FILE = data_path("seen_selfpromo.json")
@@ -814,8 +816,24 @@ def poll_telegram_updates():
     for update in data.get("result", []):
         max_update_id = max(max_update_id, update["update_id"])
 
-        # фото як reply на прев'ю поста — прикріплюємо до відповідного pending запису
+        # команда /dashboard — шле кнопку що відкриває веб-панель як Telegram Mini App
         message = update.get("message")
+        if message and message.get("text", "").strip() == "/dashboard":
+            if not DASHBOARD_URL:
+                send_telegram_dm("Дашборд ще не налаштований (немає DASHBOARD_URL)")
+            else:
+                dash_url = DASHBOARD_URL
+                if DASHBOARD_TOKEN:
+                    dash_url += f"?token={DASHBOARD_TOKEN}"
+                keyboard = {
+                    "inline_keyboard": [[
+                        {"text": "Відкрити панель", "web_app": {"url": dash_url}}
+                    ]]
+                }
+                send_telegram_dm("Контент-план, історія постів і статистика відео:", reply_markup=keyboard)
+            continue
+
+        # фото як reply на прев'ю поста — прикріплюємо до відповідного pending запису
         if message and message.get("photo") and message.get("reply_to_message"):
             replied_id = message["reply_to_message"]["message_id"]
             for short_id, item in pending_channel.items():
