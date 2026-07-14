@@ -3,15 +3,16 @@
 історії постів з метриками і таблиці статистики відео.
 
 Запускається як окремий Railway-сервіс (web-процес), окремо від worker'а (main.py),
-але читає/пише ті самі json-файли через спільний DATA_DIR (той самий Volume що і в main.py).
+але читає/пише той самий стан через storage.py (Postgres якщо DATABASE_URL підключений,
+інакше json-файли як запасний варіант) — той самий механізм що і в main.py.
 """
 
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import requests
 import os
-import json
 from datetime import datetime
+from storage import load_json, save_json, init_db
 
 # ===== КОНФІГ (ті самі змінні що і в main.py) =====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -19,33 +20,14 @@ THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")  # захист від випадкового доступу до URL
 
-DATA_DIR = os.getenv("DATA_DIR", ".")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def data_path(filename):
-    return os.path.join(DATA_DIR, filename)
-
-
-LOG_FILE = data_path("posts_log.json")
-TELEGRAM_LOG_FILE = data_path("telegram_log.json")
-INSIGHTS_FILE = data_path("style_insights.json")
-CONTENT_PLAN_FILE = data_path("content_plan.json")
-VIDEO_STATS_FILE = data_path("video_stats.json")
+LOG_FILE = "posts_log"
+TELEGRAM_LOG_FILE = "telegram_log"
+INSIGHTS_FILE = "style_insights"
+CONTENT_PLAN_FILE = "content_plan"
+VIDEO_STATS_FILE = "video_stats"
 
 app = Flask(__name__)
-
-
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+init_db()
 
 
 def check_token():

@@ -8,6 +8,7 @@ import json
 import hashlib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from storage import load_json, save_json, init_db
 
 load_dotenv()
 
@@ -18,24 +19,14 @@ THREADS_USER_ID = os.getenv("THREADS_USER_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # напр. @hodakov_digital або -100...
 
-# Папка для всіх json-файлів стану. За замовчуванням поточна папка (для локального запуску),
-# але на Railway ОБОВ'ЯЗКОВО треба підключити Volume і виставити DATA_DIR=/data (або інший шлях
-# монтування) — інакше файли стану обнуляються при кожному редеплої і всі захисти
-# (анти-дубль постів, дедуп лідів, pending на підтвердження) перестають працювати.
-DATA_DIR = os.getenv("DATA_DIR", ".")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def data_path(filename):
-    return os.path.join(DATA_DIR, filename)
-
-
-LOG_FILE = data_path("posts_log.json")
-INSIGHTS_FILE = data_path("style_insights.json")
-TELEGRAM_LOG_FILE = data_path("telegram_log.json")
-PENDING_CHANNEL_POSTS_FILE = data_path("pending_channel_posts.json")
-VIDEO_STATS_FILE = data_path("video_stats.json")  # та сама таблиця що заповнює dashboard.py
-CONTENT_PLAN_FILE = data_path("content_plan.json")  # той самий план що і на вкладці dashboard.py
+# Стан тепер зберігається через storage.py — в Postgres (DATABASE_URL з Railway) якщо він
+# підключений, з падінням назад на json-файли якщо ні. Це просто логічні ключі, не шляхи файлів.
+LOG_FILE = "posts_log"
+INSIGHTS_FILE = "style_insights"
+TELEGRAM_LOG_FILE = "telegram_log"
+PENDING_CHANNEL_POSTS_FILE = "pending_channel_posts"
+VIDEO_STATS_FILE = "video_stats"  # та сама таблиця що заповнює dashboard.py
+CONTENT_PLAN_FILE = "content_plan"  # той самий план що і на вкладці dashboard.py
 
 # Постійна клавіатура внизу чату — щоб не пам'ятати команди напам'ять
 MAIN_KEYBOARD = {
@@ -67,11 +58,11 @@ TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий
 DASHBOARD_URL = os.getenv("DASHBOARD_URL")    # публічний домен сервісу dashboard.py на Railway
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")  # той самий токен що і в dashboard.py
 
-SEEN_LEADS_FILE = data_path("seen_leads.json")
-SEEN_SELFPROMO_FILE = data_path("seen_selfpromo.json")
-PENDING_REPLIES_FILE = data_path("pending_replies.json")
-TELEGRAM_OFFSET_FILE = data_path("telegram_offset.json")
-REPLY_TEMPLATE_STATE_FILE = data_path("reply_template_state.json")
+SEEN_LEADS_FILE = "seen_leads"
+SEEN_SELFPROMO_FILE = "seen_selfpromo"
+PENDING_REPLIES_FILE = "pending_replies"
+TELEGRAM_OFFSET_FILE = "telegram_offset"
+REPLY_TEMPLATE_STATE_FILE = "reply_template_state"
 
 LEAD_KEYWORDS = [
     "потрібен розробник сайту",
@@ -204,27 +195,19 @@ BASE_SYSTEM_PROMPT = """Ти пишеш пости для Threads від іме�
 
 # ===== ЛОГИ =====
 def load_log():
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return load_json(LOG_FILE, [])
 
 
 def save_log(posts):
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(posts, f, ensure_ascii=False, indent=2)
+    save_json(LOG_FILE, posts)
 
 
 def load_insights():
-    if os.path.exists(INSIGHTS_FILE):
-        with open(INSIGHTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"insights": None, "updated_at": None}
+    return load_json(INSIGHTS_FILE, {"insights": None, "updated_at": None})
 
 
 def save_insights(data):
-    with open(INSIGHTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_json(INSIGHTS_FILE, data)
 
 
 # ===== МЕТРИКИ =====
@@ -456,15 +439,11 @@ def publish_to_telegram(text, photo_file_id=None):
 
 
 def load_telegram_log():
-    if os.path.exists(TELEGRAM_LOG_FILE):
-        with open(TELEGRAM_LOG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return load_json(TELEGRAM_LOG_FILE, [])
 
 
 def save_telegram_log(posts):
-    with open(TELEGRAM_LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(posts, f, ensure_ascii=False, indent=2)
+    save_json(TELEGRAM_LOG_FILE, posts)
 
 
 def crosspost_to_telegram(threads_text, pillar_type):
@@ -759,19 +738,6 @@ HELP_TEXT = (
     "Сповіщення про лідів і саморекламні тредси, а також запити на публікацію в Telegram-канал "
     "приходять самі, з кнопками підтвердження."
 )
-
-
-# ===== JSON ХЕЛПЕРИ =====
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ===== TELEGRAM DM (сповіщення власнику, не канал) =====
@@ -1085,6 +1051,7 @@ schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка на
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
     print("Розклад по Києву: 06-12 раз на 2год, 12-16 щогодини, 16-21 раз на 2год, 21-23 один пост, 23-06 тиша")
+    init_db()
     register_bot_commands()
     print("Перевірка при старті (пропускається якщо не в вікні або останній пост був недавно)...")
     post_to_threads()

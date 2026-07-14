@@ -3,3 +3,4 @@ requests
 schedule
 python-dotenv
 flask
+psycopg2-binary
