@@ -525,7 +525,27 @@ def publish_threads_post(creation_id):
     return data["id"]
 
 
-MIN_HOURS_BETWEEN_POSTS = 4  # захист від дублів при рестарті/паралельному деплої
+KYIV_UTC_OFFSET_HOURS = 3  # без урахування переходів на зимовий/літній час — як і було в проєкті
+
+# Вікна публікацій по Києву: (година_від, година_до, інтервал_годин_між_постами).
+# 23:00-06:00 навмисно відсутнє в списку — в цей час не постимо взагалі.
+POSTING_WINDOWS = [
+    (6, 12, 2),   # 06:00-12:00 — 1 пост на 2 години
+    (12, 16, 1),  # 12:00-16:00 — 1 пост на годину
+    (16, 21, 2),  # 16:00-21:00 — 1 пост на 2 години
+    (21, 23, 2),  # 21:00-23:00 — 1 пост (інтервал 2 год в 2-годинному вікні = максимум один)
+]
+
+
+def kyiv_now():
+    return datetime.utcnow() + timedelta(hours=KYIV_UTC_OFFSET_HOURS)
+
+
+def desired_interval_hours(hour):
+    for start, end, interval in POSTING_WINDOWS:
+        if start <= hour < end:
+            return interval
+    return None  # 23:00-06:00
 
 
 def hours_since_last_post():
@@ -539,11 +559,17 @@ def hours_since_last_post():
 
 def post_to_threads():
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    kyiv_hour = kyiv_now().hour
+
+    interval = desired_interval_hours(kyiv_hour)
+    if interval is None:
+        print(f"\n[{timestamp}] Зараз {kyiv_hour}:00 за Києвом — вікно 23:00-06:00, не постимо")
+        return
 
     hours_since = hours_since_last_post()
-    if hours_since is not None and hours_since < MIN_HOURS_BETWEEN_POSTS:
-        print(f"\n[{timestamp}] Останній пост був {hours_since:.1f} год тому — "
-              f"пропускаю, щоб не постити частіше ніж раз на {MIN_HOURS_BETWEEN_POSTS} год")
+    if hours_since is not None and hours_since < interval:
+        print(f"\n[{timestamp}] Останній пост був {hours_since:.1f} год тому, для {kyiv_hour}:00 "
+              f"потрібно {interval} год між постами — пропускаю")
         return
 
     print(f"\n[{timestamp}] Генерую пост...")
@@ -840,7 +866,7 @@ def poll_telegram_updates():
 
 
 # ===== РОЗКЛАД =====
-schedule.every(4).hours.do(post_to_threads)            # 1 пост кожні 4 години (захист від бану за спам)
+schedule.every(30).minutes.do(post_to_threads)         # перевірка вікна публікацій (див. POSTING_WINDOWS)
 schedule.every(4).hours.do(daily_maintenance)          # аналіз кожні 4 години
 schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
@@ -848,8 +874,8 @@ schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка на
 
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
-    print(f"Розклад: 1 пост кожні {MIN_HOURS_BETWEEN_POSTS} години")
-    print("Перевірка при старті (пропускається якщо останній пост був недавно)...")
+    print("Розклад по Києву: 06-12 раз на 2год, 12-16 щогодини, 16-21 раз на 2год, 21-23 один пост, 23-06 тиша")
+    print("Перевірка при старті (пропускається якщо не в вікні або останній пост був недавно)...")
     post_to_threads()
 
     while True:
