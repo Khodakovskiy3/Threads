@@ -20,10 +20,12 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # напр. @hodakov_dig
 LOG_FILE = "posts_log.json"
 INSIGHTS_FILE = "style_insights.json"
 TELEGRAM_LOG_FILE = "telegram_log.json"
+PENDING_CHANNEL_POSTS_FILE = "pending_channel_posts.json"
 
 # Типи постів які вважаються "експертними" — саме вони дублюються
-# розширеною версією в Telegram і отримують CTA в кінці Threads-поста
-EXPERT_TYPES = {"value_tip", "ai_dev", "developer_pain"}
+# розширеною версією в Telegram і отримують CTA в кінці Threads-поста.
+# developer_pain навмисно виключений — це історія, а не лайфхак, туди CTA виглядає недоречно.
+EXPERT_TYPES = {"value_tip", "ai_dev"}
 
 TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hodakov_digital"
 
@@ -91,8 +93,12 @@ CONTENT_PILLARS = [
     },
     {
         "type": "ai_dev",
-        "prompt": """Напиши пост про те як AI змінює розробку сайтів що це означає для клієнтів.
-Не технічно, а людською мовою. Без хайпу. Просто факт з роботи."""
+        "prompt": """Напиши конкретний лайфхак з власної розробки на основі AI-інструментів
+(Claude, Cursor, ChatGPT). Це має бути прийом який можна застосувати прямо зараз:
+як економити токени, який промт реально працює краще, який інструмент рятує час,
+як побудувати процес щоб AI менше плутався. Без загальних роздумів про 'майбутнє AI'
+чи 'як AI змінює індустрію'. Один конкретний прийом, по суті, як людина ділиться
+знахідкою з роботи."""
     },
     {
         "type": "value_tip",
@@ -377,10 +383,32 @@ def generate_telegram_post(threads_text, pillar_type):
     return response.choices[0].message.content.strip()
 
 
-def publish_to_telegram(text):
+def publish_to_telegram(text, photo_file_id=None):
+    """Публікує в Telegram-канал. Якщо є фото — постить його з підписом (caption),
+    якщо текст довший за ліміт підпису (1024 символи) — шле фото і текст окремим повідомленням."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         print("Telegram не налаштований (немає TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL_ID) — пропускаю")
         return None
+
+    if photo_file_id:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        fits_caption = len(text) <= 1024
+        params = {
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "photo": photo_file_id,
+            "caption": text if fits_caption else ""
+        }
+        response = requests.post(url, params=params)
+        data = response.json()
+        if not data.get("ok"):
+            raise Exception(f"Помилка публікації в Telegram: {data}")
+        message_id = data["result"]["message_id"]
+
+        if not fits_caption:
+            extra_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(extra_url, params={"chat_id": TELEGRAM_CHANNEL_ID, "text": text})
+
+        return message_id
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     params = {
@@ -407,24 +435,47 @@ def save_telegram_log(posts):
 
 
 def crosspost_to_telegram(threads_text, pillar_type):
-    """Якщо пост експертного типу — генерує розширену версію і публікує в Telegram."""
+    """Якщо пост експертного типу (лайфхак/тіп) — генерує розширену версію і шле власнику
+    в Telegram на перевірку з кнопками Опублікувати/Скасувати. Ніякої автопублікації в канал —
+    можна ще прикріпити фото (reply фоткою на це повідомлення) перед публікацією."""
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
     try:
         tg_text = generate_telegram_post(threads_text, pillar_type)
-        print(f"\nTelegram-пост (тип {pillar_type}):\n{'-'*40}\n{tg_text}\n{'-'*40}")
-        message_id = publish_to_telegram(tg_text)
+        print(f"\nTelegram-пост на перевірку (тип {pillar_type}):\n{'-'*40}\n{tg_text}\n{'-'*40}")
+
+        short_id = hashlib.md5((threads_text + timestamp).encode()).hexdigest()[:10]
+
+        message = (
+            f"Готовий пост для Telegram-каналу (тип {pillar_type})\n\n"
+            f"{tg_text}\n\n"
+            f"Якщо треба фото — зроби reply на це повідомлення фоткою, потім тисни Опублікувати."
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "Опублікувати", "callback_data": f"pub:{short_id}"},
+                {"text": "Скасувати", "callback_data": f"cancel:{short_id}"}
+            ]]
+        }
+        prompt_message_id = send_telegram_dm(message, reply_markup=keyboard)
+
+        pending_channel = load_json(PENDING_CHANNEL_POSTS_FILE, {})
+        pending_channel[short_id] = {
+            "type": pillar_type,
+            "text": tg_text,
+            "prompt_message_id": prompt_message_id,
+            "photo_file_id": None,
+            "timestamp": timestamp
+        }
+        save_json(PENDING_CHANNEL_POSTS_FILE, pending_channel)
 
         posts = load_telegram_log()
         posts.append({
             "timestamp": timestamp,
             "type": pillar_type,
             "text": tg_text,
-            "message_id": message_id,
-            "status": "published" if message_id else "skipped"
+            "status": "pending_review"
         })
         save_telegram_log(posts)
-        if message_id:
-            print(f"Опубліковано в Telegram! ID: {message_id}")
 
     except Exception as e:
         print(f"Помилка Telegram: {e}")
@@ -685,7 +736,12 @@ def search_selfpromo():
 
 
 def poll_telegram_updates():
-    """Перевіряє натискання кнопок Відправлено/Пропустити і прибирає їх з pending."""
+    """Перевіряє:
+    1) фото-реплаї на прев'ю Telegram-поста — прикріплює фото до pending_channel_posts
+    2) натискання кнопок:
+       - done/skip — для готових відповідей під саморекламні тредси (pending_replies)
+       - pub/cancel — для публікації/скасування Telegram-крос-поста (pending_channel_posts)
+    """
     if not TELEGRAM_BOT_TOKEN:
         return
 
@@ -703,11 +759,23 @@ def poll_telegram_updates():
     if not data.get("ok"):
         return
 
-    pending = load_json(PENDING_REPLIES_FILE, {})
+    pending_replies = load_json(PENDING_REPLIES_FILE, {})
+    pending_channel = load_json(PENDING_CHANNEL_POSTS_FILE, {})
     max_update_id = offset_data["offset"] - 1
 
     for update in data.get("result", []):
         max_update_id = max(max_update_id, update["update_id"])
+
+        # фото як reply на прев'ю поста — прикріплюємо до відповідного pending запису
+        message = update.get("message")
+        if message and message.get("photo") and message.get("reply_to_message"):
+            replied_id = message["reply_to_message"]["message_id"]
+            for short_id, item in pending_channel.items():
+                if item.get("prompt_message_id") == replied_id:
+                    item["photo_file_id"] = message["photo"][-1]["file_id"]
+                    send_telegram_dm("Фото додано до цього поста. Тисни Опублікувати коли готово.")
+                    break
+
         callback = update.get("callback_query")
         if not callback:
             continue
@@ -719,15 +787,33 @@ def poll_telegram_updates():
             continue
 
         action, short_id = data_str.split(":", 1)
-        if short_id in pending:
-            pending.pop(short_id, None)
-            answer_text = "Відмічено як відправлене" if action == "done" else "Пропущено"
-        else:
-            answer_text = "Вже оброблено"
 
-        answer_callback_query(callback_id, answer_text)
+        if action in ("done", "skip"):
+            if short_id in pending_replies:
+                pending_replies.pop(short_id, None)
+                answer_text = "Відмічено як відправлене" if action == "done" else "Пропущено"
+            else:
+                answer_text = "Вже оброблено"
+            answer_callback_query(callback_id, answer_text)
 
-    save_json(PENDING_REPLIES_FILE, pending)
+        elif action in ("pub", "cancel"):
+            if short_id in pending_channel:
+                item = pending_channel.pop(short_id)
+                if action == "pub":
+                    try:
+                        publish_to_telegram(item["text"], item.get("photo_file_id"))
+                        answer_text = "Опубліковано в каналі"
+                    except Exception as e:
+                        answer_text = f"Помилка публікації: {e}"
+                        print(answer_text)
+                else:
+                    answer_text = "Скасовано"
+            else:
+                answer_text = "Вже оброблено"
+            answer_callback_query(callback_id, answer_text)
+
+    save_json(PENDING_REPLIES_FILE, pending_replies)
+    save_json(PENDING_CHANNEL_POSTS_FILE, pending_channel)
     save_json(TELEGRAM_OFFSET_FILE, {"offset": max_update_id + 1})
 
 
