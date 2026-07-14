@@ -35,6 +35,23 @@ INSIGHTS_FILE = data_path("style_insights.json")
 TELEGRAM_LOG_FILE = data_path("telegram_log.json")
 PENDING_CHANNEL_POSTS_FILE = data_path("pending_channel_posts.json")
 VIDEO_STATS_FILE = data_path("video_stats.json")  # та сама таблиця що заповнює dashboard.py
+CONTENT_PLAN_FILE = data_path("content_plan.json")  # той самий план що і на вкладці dashboard.py
+
+# Постійна клавіатура внизу чату — щоб не пам'ятати команди напам'ять
+MAIN_KEYBOARD = {
+    "keyboard": [
+        ["Панель", "Аналіз"],
+        ["Нові ідеї", "Допомога"]
+    ],
+    "resize_keyboard": True
+}
+
+BOT_COMMANDS = [
+    {"command": "dashboard", "description": "Відкрити панель (контент-план, пости, відео)"},
+    {"command": "analysis", "description": "Останній аналіз постів текстом"},
+    {"command": "ideas", "description": "Згенерувати нові ідеї для постів"},
+    {"command": "help", "description": "Що вміє бот"},
+]
 
 # Типи постів які вважаються "експертними" — саме вони дублюються
 # розширеною версією в Telegram і отримують CTA в кінці Threads-поста.
@@ -682,6 +699,68 @@ def answer_bot_question(question):
         alert_error("відповідь на питання в боті", e)
 
 
+def generate_content_ideas(count=10):
+    """Генерує нові ідеї для контент-плану на основі попереднього аналізу і топових постів.
+    Дописує в CONTENT_PLAN_FILE (та сама таблиця що на вкладці 'Контент-план' в /dashboard)
+    і повертає список нових текстів ідей."""
+    insights = load_insights()
+    posts = load_log()
+    top_texts = [p["text"] for p in posts if p.get("metrics") and p.get("text")][-10:]
+
+    context = ""
+    if insights.get("insights"):
+        context += f"Аналіз того що вже добре заходить:\n{insights['insights']}\n\n"
+    if top_texts:
+        context += "Приклади постів що вже публікувались:\n" + "\n---\n".join(top_texts[:5])
+
+    prompt = f"""Ти генеруєш контент-план для Threads акаунту розробника сайтів @hodakov.digital
+(робить сайти з AI за 5-7 днів).
+
+{context}
+
+Згенеруй {count} нових креативних ідей для постів, які спираються на те що вже добре заходило,
+але не повторюють один в один старі пости. Ідеї мають бути конкретні, з реальним потенціалом
+на охоплення — не загальні теми типу "пост про AI", а конкретна ситуація чи думка яку можна
+одразу перетворити в пост.
+
+Формат відповіді — рівно {count} рядків, без нумерації, без зайвого тексту, кожен рядок це одна ідея."""
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=800,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    lines = [l.strip("-• \t") for l in response.choices[0].message.content.strip().split("\n") if l.strip()]
+
+    plan = load_json(CONTENT_PLAN_FILE, [])
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    for line in lines:
+        plan.append({
+            "id": f"idea-{len(plan)}-{int(datetime.now().timestamp())}",
+            "text": line,
+            "status": "todo",
+            "created_at": now,
+            "done_at": None
+        })
+    save_json(CONTENT_PLAN_FILE, plan)
+    return lines
+
+
+HELP_TEXT = (
+    "Що вміє бот:\n\n"
+    "Пости в Threads публікуються самі по розкладу (06-12 раз на 2 год, 12-16 щогодини, "
+    "16-21 раз на 2 год, 21-23 один пост, 23-06 тиша).\n\n"
+    "Панель — контент-план, історія постів з метриками, таблиця відео.\n"
+    "Аналіз — останній аналіз того що добре заходить, текстом прямо в чат.\n"
+    "Нові ідеї — згенерувати ще ідей для контент-плану.\n\n"
+    "Просто питання текстом (без /) — бот відповість спираючись на реальну статистику акаунту.\n\n"
+    "Сповіщення про лідів і саморекламні тредси, а також запити на публікацію в Telegram-канал "
+    "приходять самі, з кнопками підтвердження."
+)
+
+
 # ===== JSON ХЕЛПЕРИ =====
 def load_json(path, default):
     if os.path.exists(path):
@@ -733,6 +812,28 @@ def answer_callback_query(callback_id, text=None):
         requests.post(url, params=params)
     except Exception:
         pass
+
+
+def register_bot_commands():
+    """Реєструє список команд в меню '/' Telegram — викликати один раз при старті."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
+    try:
+        requests.post(url, json={"commands": BOT_COMMANDS})
+    except Exception as e:
+        print(f"Не вдалось зареєструвати команди бота: {e}")
+
+
+def send_dashboard_button():
+    if not DASHBOARD_URL:
+        send_telegram_dm("Дашборд ще не налаштований (немає DASHBOARD_URL)")
+        return
+    dash_url = DASHBOARD_URL
+    if DASHBOARD_TOKEN:
+        dash_url += f"?token={DASHBOARD_TOKEN}"
+    keyboard = {"inline_keyboard": [[{"text": "Відкрити панель", "web_app": {"url": dash_url}}]]}
+    send_telegram_dm("Контент-план, історія постів і статистика відео:", reply_markup=keyboard)
 
 
 # ===== ПОШУК ЛІДІВ І САМОРЕКЛАМИ ЧЕРЕЗ GOOGLE =====
@@ -879,21 +980,44 @@ def poll_telegram_updates():
     for update in data.get("result", []):
         max_update_id = max(max_update_id, update["update_id"])
 
-        # команда /dashboard — шле кнопку що відкриває веб-панель як Telegram Mini App
         message = update.get("message")
-        if message and message.get("text", "").strip() == "/dashboard":
-            if not DASHBOARD_URL:
-                send_telegram_dm("Дашборд ще не налаштований (немає DASHBOARD_URL)")
+        text = message.get("text", "").strip() if message else ""
+
+        # /start — вітання + постійна клавіатура з кнопками замість команд напам'ять
+        if text == "/start":
+            send_telegram_dm(
+                "Готово, бот на зв'язку. Знизу є кнопки для швидкого доступу, або просто питай текстом.",
+                reply_markup=MAIN_KEYBOARD
+            )
+            continue
+
+        # Панель — команда /dashboard або кнопка клавіатури
+        if text in ("/dashboard", "Панель"):
+            send_dashboard_button()
+            continue
+
+        # Аналіз — останній style_insights.json прямо текстом в чат
+        if text in ("/analysis", "Аналіз"):
+            insights = load_insights()
+            if insights.get("insights"):
+                send_telegram_dm(f"Аналіз (оновлено {insights.get('updated_at', '?')}):\n\n{insights['insights']}")
             else:
-                dash_url = DASHBOARD_URL
-                if DASHBOARD_TOKEN:
-                    dash_url += f"?token={DASHBOARD_TOKEN}"
-                keyboard = {
-                    "inline_keyboard": [[
-                        {"text": "Відкрити панель", "web_app": {"url": dash_url}}
-                    ]]
-                }
-                send_telegram_dm("Контент-план, історія постів і статистика відео:", reply_markup=keyboard)
+                send_telegram_dm("Аналізу ще нема — з'явиться після 5+ опублікованих постів з метриками.")
+            continue
+
+        # Нові ідеї — генерує і одразу показує текстом (та ж таблиця що і в /dashboard)
+        if text in ("/ideas", "Нові ідеї"):
+            try:
+                ideas = generate_content_ideas(10)
+                listed = "\n".join(f"{i+1}. {idea}" for i, idea in enumerate(ideas))
+                send_telegram_dm(f"Нові ідеї (додані в контент-план):\n\n{listed}")
+            except Exception as e:
+                alert_error("генерація ідей з бота", e)
+            continue
+
+        # Допомога
+        if text in ("/help", "Допомога"):
+            send_telegram_dm(HELP_TEXT)
             continue
 
         # фото як reply на прев'ю поста — прикріплюємо до відповідного pending запису
@@ -906,11 +1030,9 @@ def poll_telegram_updates():
                     break
 
         # довільний текст без фото і без "/" на початку — трактуємо як питання про контент/стратегію
-        if message and message.get("text") and not message.get("photo"):
-            question_text = message["text"].strip()
-            if question_text and not question_text.startswith("/"):
-                answer_bot_question(question_text)
-                continue
+        if text and not (message and message.get("photo")):
+            answer_bot_question(text)
+            continue
 
         callback = update.get("callback_query")
         if not callback:
@@ -963,6 +1085,7 @@ schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка на
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
     print("Розклад по Києву: 06-12 раз на 2год, 12-16 щогодини, 16-21 раз на 2год, 21-23 один пост, 23-06 тиша")
+    register_bot_commands()
     print("Перевірка при старті (пропускається якщо не в вікні або останній пост був недавно)...")
     post_to_threads()
 
