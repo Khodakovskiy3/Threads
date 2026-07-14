@@ -6,6 +6,7 @@ import random
 import os
 import json
 import hashlib
+import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from storage import load_json, save_json, init_db
@@ -1048,11 +1049,23 @@ schedule.every(30).minutes.do(search_leads)            # пошук лідів (
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
 schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка натискань кнопок
 
+def run_dashboard_in_background():
+    """Стартує Flask-панель (dashboard.py) в окремому потоці того самого процесу —
+    так не треба окремого Railway-сервісу, панель живе на тому ж домені що і воркер."""
+    try:
+        from dashboard import app as dashboard_app
+        port = int(os.getenv("PORT", 8080))
+        dashboard_app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+    except Exception as e:
+        print(f"Не вдалось запустити dashboard в фоні: {e}")
+
+
 if __name__ == "__main__":
     print("Threads AutoPoster — hodakov.digital")
     print("Розклад по Києву: 06-12 раз на 2год, 12-16 щогодини, 16-21 раз на 2год, 21-23 один пост, 23-06 тиша")
     init_db()
     register_bot_commands()
+    threading.Thread(target=run_dashboard_in_background, daemon=True).start()
     print("Перевірка при старті (пропускається якщо не в вікні або останній пост був недавно)...")
     post_to_threads()
 
