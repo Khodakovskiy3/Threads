@@ -17,10 +17,23 @@ THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # напр. @hodakov_digital або -100...
-LOG_FILE = "posts_log.json"
-INSIGHTS_FILE = "style_insights.json"
-TELEGRAM_LOG_FILE = "telegram_log.json"
-PENDING_CHANNEL_POSTS_FILE = "pending_channel_posts.json"
+
+# Папка для всіх json-файлів стану. За замовчуванням поточна папка (для локального запуску),
+# але на Railway ОБОВ'ЯЗКОВО треба підключити Volume і виставити DATA_DIR=/data (або інший шлях
+# монтування) — інакше файли стану обнуляються при кожному редеплої і всі захисти
+# (анти-дубль постів, дедуп лідів, pending на підтвердження) перестають працювати.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def data_path(filename):
+    return os.path.join(DATA_DIR, filename)
+
+
+LOG_FILE = data_path("posts_log.json")
+INSIGHTS_FILE = data_path("style_insights.json")
+TELEGRAM_LOG_FILE = data_path("telegram_log.json")
+PENDING_CHANNEL_POSTS_FILE = data_path("pending_channel_posts.json")
 
 # Типи постів які вважаються "експертними" — саме вони дублюються
 # розширеною версією в Telegram і отримують CTA в кінці Threads-поста.
@@ -34,11 +47,11 @@ GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
 
-SEEN_LEADS_FILE = "seen_leads.json"
-SEEN_SELFPROMO_FILE = "seen_selfpromo.json"
-PENDING_REPLIES_FILE = "pending_replies.json"
-TELEGRAM_OFFSET_FILE = "telegram_offset.json"
-REPLY_TEMPLATE_STATE_FILE = "reply_template_state.json"
+SEEN_LEADS_FILE = data_path("seen_leads.json")
+SEEN_SELFPROMO_FILE = data_path("seen_selfpromo.json")
+PENDING_REPLIES_FILE = data_path("pending_replies.json")
+TELEGRAM_OFFSET_FILE = data_path("telegram_offset.json")
+REPLY_TEMPLATE_STATE_FILE = data_path("reply_template_state.json")
 
 LEAD_KEYWORDS = [
     "потрібен розробник сайту",
@@ -478,7 +491,7 @@ def crosspost_to_telegram(threads_text, pillar_type):
         save_telegram_log(posts)
 
     except Exception as e:
-        print(f"Помилка Telegram: {e}")
+        alert_error("Telegram crosspost", e)
         posts = load_telegram_log()
         posts.append({"timestamp": timestamp, "type": pillar_type, "status": "error", "error": str(e)})
         save_telegram_log(posts)
@@ -562,7 +575,7 @@ def post_to_threads():
             crosspost_to_telegram(text, pillar_type)
 
     except Exception as e:
-        print(f"Помилка: {e}")
+        alert_error("publish Threads post", e)
         posts = load_log()
         posts.append({"timestamp": timestamp, "status": "error", "error": str(e)})
         save_log(posts)
@@ -571,8 +584,11 @@ def post_to_threads():
 def daily_maintenance():
     """Щоденне: підтягує метрики + оновлює аналіз"""
     print("\nЩоденне оновлення метрик...")
-    update_metrics()
-    analyze_and_learn()
+    try:
+        update_metrics()
+        analyze_and_learn()
+    except Exception as e:
+        alert_error("daily_maintenance (метрики/аналіз)", e)
 
 
 # ===== JSON ХЕЛПЕРИ =====
@@ -609,6 +625,12 @@ def send_telegram_dm(text, reply_markup=None):
     except Exception as e:
         print(f"Помилка Telegram DM: {e}")
         return None
+
+
+def alert_error(context, error):
+    """Друкує помилку в лог І шле власнику в Telegram, щоб не пропустити збій пайплайну."""
+    print(f"Помилка [{context}]: {error}")
+    send_telegram_dm(f"Помилка: {context}\n\n{error}")
 
 
 def answer_callback_query(callback_id, text=None):
@@ -666,7 +688,7 @@ def search_leads():
     try:
         items = google_search(query)
     except Exception as e:
-        print(f"Помилка пошуку лідів: {e}")
+        alert_error("пошук лідів", e)
         return
 
     new_seen = seen[:]
@@ -700,7 +722,7 @@ def search_selfpromo():
     try:
         items = google_search(query)
     except Exception as e:
-        print(f"Помилка пошуку самореклами: {e}")
+        alert_error("пошук самореклами", e)
         return
 
     new_seen = seen[:]
@@ -831,5 +853,9 @@ if __name__ == "__main__":
     post_to_threads()
 
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            # запобіжник: жодна окрема задача не повинна вбивати весь воркер
+            alert_error("schedule.run_pending", e)
         time.sleep(60)
