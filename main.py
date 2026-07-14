@@ -34,6 +34,7 @@ LOG_FILE = data_path("posts_log.json")
 INSIGHTS_FILE = data_path("style_insights.json")
 TELEGRAM_LOG_FILE = data_path("telegram_log.json")
 PENDING_CHANNEL_POSTS_FILE = data_path("pending_channel_posts.json")
+VIDEO_STATS_FILE = data_path("video_stats.json")  # та сама таблиця що заповнює dashboard.py
 
 # Типи постів які вважаються "експертними" — саме вони дублюються
 # розширеною версією в Telegram і отримують CTA в кінці Threads-поста.
@@ -619,6 +620,68 @@ def daily_maintenance():
         alert_error("daily_maintenance (метрики/аналіз)", e)
 
 
+def answer_bot_question(question):
+    """Відповідає на довільне питання власника (напр. 'куди рухатись з відео'),
+    спираючись на реальні дані акаунту: топ/слабкі пости, статистику відео, попередній аналіз.
+    Не генерує загальних порад — якщо даних мало, чесно каже що бракує."""
+    try:
+        posts = load_log()
+        with_metrics = [p for p in posts if p.get("status") == "published" and p.get("metrics")]
+        video_stats = load_json(VIDEO_STATS_FILE, [])
+        insights = load_insights()
+
+        if not with_metrics and not video_stats:
+            send_telegram_dm(
+                "Поки що замало даних (нема опублікованих постів з метриками чи доданих відео в "
+                "таблицю), щоб відповісти конкретно. Додай пару відео в панель (/dashboard) або "
+                "почекай поки набіжать перегляди на пости — і питай знову."
+            )
+            return
+
+        def fmt_post(p):
+            m = p.get("metrics", {})
+            return (f"[{p.get('type', '?')}] перегляди {m.get('views', 0)}, лайки {m.get('likes', 0)}, "
+                    f"репости {m.get('reposts', 0)}: {p.get('text', '')[:200]}")
+
+        def fmt_video(v):
+            return (f"[{v.get('platform')}] перегляди {v.get('views', '-')}, лайки {v.get('likes', '-')}, "
+                    f"коментарі {v.get('comments', '-')}: {v.get('url', '')}")
+
+        sorted_posts = sorted(with_metrics, key=lambda p: p["metrics"].get("views", 0), reverse=True)
+
+        context = ""
+        if sorted_posts:
+            context += "ТОП ПОСТИ ЗА ОХОПЛЕННЯМ:\n" + "\n".join(fmt_post(p) for p in sorted_posts[:5])
+            context += "\n\nСЛАБКІ ПОСТИ:\n" + "\n".join(fmt_post(p) for p in sorted_posts[-5:])
+        if video_stats:
+            context += "\n\nВІДЕО ЯКІ ВЖЕ ПУБЛІКУВАЛИСЬ:\n" + "\n".join(fmt_video(v) for v in video_stats[-15:])
+        if insights.get("insights"):
+            context += f"\n\nПОПЕРЕДНІЙ АНАЛІЗ ПОСТІВ:\n{insights['insights']}"
+
+        prompt = f"""Ти аналітик контенту для Threads і відео (TikTok/Reels/Threads) акаунту
+розробника сайтів @hodakov.digital.
+
+{context}
+
+Питання власника акаунту: {question}
+
+Дай конкретну відповідь спираючись тільки на ці реальні дані, без загальних порад типу
+'знімайте більше відео' чи 'будьте автентичним' без прив'язки до того що показують цифри.
+Якщо даних замало щоб впевнено відповісти на щось конкретне в питанні — чесно скажи що саме
+бракує (наприклад мало відео в таблиці, чи мало постів з метриками)."""
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        send_telegram_dm(response.choices[0].message.content.strip())
+
+    except Exception as e:
+        alert_error("відповідь на питання в боті", e)
+
+
 # ===== JSON ХЕЛПЕРИ =====
 def load_json(path, default):
     if os.path.exists(path):
@@ -841,6 +904,13 @@ def poll_telegram_updates():
                     item["photo_file_id"] = message["photo"][-1]["file_id"]
                     send_telegram_dm("Фото додано до цього поста. Тисни Опублікувати коли готово.")
                     break
+
+        # довільний текст без фото і без "/" на початку — трактуємо як питання про контент/стратегію
+        if message and message.get("text") and not message.get("photo"):
+            question_text = message["text"].strip()
+            if question_text and not question_text.startswith("/"):
+                answer_bot_question(question_text)
+                continue
 
         callback = update.get("callback_query")
         if not callback:
