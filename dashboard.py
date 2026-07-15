@@ -11,8 +11,15 @@ from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import requests
 import os
+import random
 from datetime import datetime
 from storage import load_json, save_json, init_db
+
+RANDOM_ASSOCIATION_WORDS = [
+    "космос", "кулінарія", "спорт", "музика", "мода", "тварини", "подорожі",
+    "погода", "гроші", "історія", "медицина", "кіно", "садівництво", "спогади дитинства",
+    "весілля", "автомобілі", "море", "гори", "школа", "сон"
+]
 
 # ===== КОНФІГ (ті самі змінні що і в main.py) =====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -67,31 +74,63 @@ def api_plan_toggle(idea_id):
     return jsonify({"ok": True})
 
 
+def engagement_score(metrics):
+    """Той самий скор що і в main.py — перегляди основний сигнал (акаунт росте, потрібне охоплення),
+    лайки/відповіді/репости/цитати додаються зверху як бонус."""
+    if not metrics:
+        return 0
+    return (
+        metrics.get("views", 0)
+        + metrics.get("likes", 0)
+        + metrics.get("replies", 0) * 2
+        + metrics.get("reposts", 0) * 3
+        + metrics.get("quotes", 0) * 3
+    )
+
+
 @app.route("/api/plan/generate", methods=["POST"])
 def api_plan_generate():
     count = int(request.json.get("count", 10)) if request.is_json else 10
     insights = load_json(INSIGHTS_FILE, {"insights": None})
     threads_posts = load_json(LOG_FILE, [])
-    top_texts = [p["text"] for p in threads_posts if p.get("metrics") and p.get("text")]
-    top_texts = top_texts[-10:]
+    posts_with_metrics = [p for p in threads_posts if p.get("metrics") and p.get("text")]
+    top_posts = sorted(posts_with_metrics, key=lambda p: engagement_score(p["metrics"]), reverse=True)
+    top_texts = [p["text"] for p in top_posts[:8]]
 
     context = ""
     if insights.get("insights"):
-        context += f"Аналіз того що вже добре заходить:\n{insights['insights']}\n\n"
+        context += f"Аналіз того що вже добре заходить (перевірений паттерн):\n{insights['insights']}\n\n"
+    if insights.get("boost_topics"):
+        context += "Теми які варто розвивати далі:\n" + "\n".join(f"- {t}" for t in insights["boost_topics"]) + "\n\n"
     if top_texts:
-        context += "Приклади постів що вже публікувались:\n" + "\n---\n".join(top_texts[:5])
+        context += "ТОП пости за реальними переглядами (це і є перевірка — нове має резонувати з цим):\n"
+        context += "\n---\n".join(top_texts)
+    if not context:
+        context = ("Даних по метриках ще нема. Орієнтуйся на больову точку аудиторії: власники малого "
+                    "бізнесу які бояться що розробник кине проект або тягнутиме місяцями.")
+
+    random_words = random.sample(RANDOM_ASSOCIATION_WORDS, min(6, len(RANDOM_ASSOCIATION_WORDS)))
 
     prompt = f"""Ти генеруєш контент-план для Threads акаунту розробника сайтів @hodakov.digital
 (робить сайти з AI за 5-7 днів).
 
+ТЕХНІКА ГЕНЕРАЦІЇ: візьми нішу (сайти для малого бізнесу, клієнти, AI в розробці) і з'єднай
+її з одним із випадкових слів нижче. Шукай неочевидний, не буквальний зв'язок — не "сайт схожий
+на X", а метафору чи ситуацію яка через це слово розкриває нішу з несподіваного боку.
+
+Випадкові слова для з'єднання: {', '.join(random_words)}
+
 {context}
 
-Згенеруй {count} нових креативних ідей для постів, які спираються на те що вже добре заходило,
-але не повторюють один в один старі пости. Ідеї мають бути конкретні, з реальним потенціалом
-на охоплення — не загальні теми типу "пост про AI", а конкретна ситуація чи думка яку можна
-одразу перетворити в пост.
+ВЕРИФІКАЦІЯ (обов'язково): кожна ідея має резонувати з тим що показано вище як перевірений
+паттерн — той самий тип гумору, той самий больовий нерв, той самий формат що вже спрацював.
+Якщо зв'язок з випадковим словом не резонує з перевіреним паттерном — підбери інший зв'язок,
+не видавай ідею яка ні на що не спирається.
 
-Формат відповіді — рівно {count} рядків, без нумерації, без зайвого тексту, кожен рядок це одна ідея."""
+Згенеруй {count} ідей. Кожна ідея конкретна, готова одразу перетворитись в пост чи відео —
+не загальна тема типу "пост про AI", а конкретна ситуація чи думка.
+
+Формат відповіді — рівно {count} рядків, без нумерації, без пояснення техніки, кожен рядок це одна ідея."""
 
     client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
@@ -341,12 +380,34 @@ async function addVideo() {
   loadVideos();
 }
 
+function listBlock(title, items) {
+  if (!items || !items.length) return '';
+  const lis = items.map(i => `<li>${i}</li>`).join('');
+  return `<div class="card"><b>${title}</b><ul>${lis}</ul></div>`;
+}
+
 async function loadInsights() {
   const res = await fetch(withToken('/api/insights'));
   const data = await res.json();
-  document.getElementById('insights').innerHTML =
-    `<div class="card insights">${data.insights ? data.insights.replace(/\\n/g, '<br>') : 'Аналізу ще нема — з\\'явиться після 5+ опублікованих постів з метриками'}</div>
-     <div class="meta">Оновлено: ${data.updated_at || '-'}</div>`;
+
+  if (!data.insights) {
+    document.getElementById('insights').innerHTML =
+      `<div class="card insights">Аналізу ще нема — з'явиться після 12+ опублікованих постів з метриками (старших 24г)</div>`;
+    return;
+  }
+
+  const paused = [];
+  (data.paused_topics || []).forEach(t => paused.push(`тема "${t.topic_id}" (до ${t.until})`));
+  (data.paused_angles || []).forEach(a => paused.push(`кут "${a.angle_id}" (до ${a.until})`));
+
+  let html = `<div class="card insights">${data.insights.replace(/\\n/g, '<br>')}</div>
+     <div class="meta">Оновлено: ${data.updated_at || '-'} · на основі ${data.based_on_posts || '?'} постів</div>`;
+  html += listBlock('Що працює', data.winning_patterns);
+  html += listBlock('Чого уникати', data.avoid_patterns);
+  html += listBlock('Розвивати далі', data.boost_topics);
+  html += listBlock('Зараз на паузі (погано заходили)', paused);
+
+  document.getElementById('insights').innerHTML = html;
 }
 
 loadPosts();

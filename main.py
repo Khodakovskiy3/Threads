@@ -47,7 +47,7 @@ BOT_COMMANDS = [
 
 # Типи постів які вважаються "експертними" — саме вони дублюються
 # розширеною версією в Telegram і отримують CTA в кінці Threads-поста.
-# developer_pain навмисно виключений — це історія, а не лайфхак, туди CTA виглядає недоречно.
+# client_risk_check навмисно виключений — це радше рефлексія, а не лайфхак, туди CTA виглядає недоречно.
 EXPERT_TYPES = {"value_tip", "ai_dev"}
 
 TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hodakov_digital"
@@ -64,6 +64,15 @@ SEEN_SELFPROMO_FILE = "seen_selfpromo"
 PENDING_REPLIES_FILE = "pending_replies"
 TELEGRAM_OFFSET_FILE = "telegram_offset"
 REPLY_TEMPLATE_STATE_FILE = "reply_template_state"
+REAL_CONTEXT_FILE = "real_context"  # реальні ситуації від Романа для storytelling_client (через "контекст: ...")
+
+# ===== САМОНАВЧАННЯ: пороги й параметри пауз =====
+MIN_POSTS_FOR_ANALYSIS = 12       # мінімум постів з метриками (старших ANALYSIS_MIN_AGE_HOURS) для першого аналізу
+ANALYSIS_MIN_AGE_HOURS = 24       # враховуємо в аналізі тільки пости старші за це, щоб дати метрикам "дозріти"
+ANGLE_PAUSE_DAYS = 14             # на скільки днів ставиться на паузу конкретний кут (angle_id) після hard zero
+TOPIC_PAUSE_DAYS = 21             # на скільки днів ставиться на паузу вся тема (topic_id)
+HARD_ZERO_RATIO = 0.2             # поріг: скор <= медіана*це І нуль лайків/відповідей/репостів/цитат = hard zero
+TOPIC_FAIL_THRESHOLD = 2          # скільки різних кутів однієї теми мають "провалитись", щоб паузити всю тему
 
 LEAD_KEYWORDS = [
     "потрібен розробник сайту",
@@ -111,10 +120,12 @@ CONTENT_PILLARS = [
 Питання має бути таке що хочеться відповісти в коментарі."""
     },
     {
-        "type": "developer_pain",
-        "prompt": """Напиши пост про типову ситуацію між клієнтом і розробником.
-Розробник кинув проект, тягнув місяцями, зробив не те.
-Без злості, просто як факт. Коротко."""
+        "type": "client_risk_check",
+        "prompt": """Напиши пост про те, як клієнт може перевірити розробника ще ДО того як платити —
+одне конкретне питання, деталь чи ознака яка одразу показує чи варто довіряти.
+Подай це через власний досвід чи конкретний випадок, не як список порад і не як нотацію
+"остерігайтесь поганих розробників". Тон спокійний, по суті, без злості на когось конкретного.
+Ідея в тому щоб показати що тобі самому нема чого приховувати від такої перевірки."""
     },
     {
         "type": "ai_dev",
@@ -138,8 +149,8 @@ CONTENT_PILLARS = [
     }
 ]
 
-BASE_SYSTEM_PROMPT = """Ти пишеш пости для Threads від імені Богдана Ходакова (@hodakov.digital).
-Богдан розробляє сайти і додатки з AI за 5-7 днів від дизайну до запуску.
+BASE_SYSTEM_PROMPT = """Ти пишеш пости для Threads від імені Романа (@hodakov.digital).
+Роман розробляє сайти і додатки з AI за 5-7 днів від дизайну до запуску.
 
 ЖОРСТКО ЗАБОРОНЕНО:
 - Тире як пунктуація
@@ -218,11 +229,92 @@ def save_log(posts):
 
 
 def load_insights():
-    return load_json(INSIGHTS_FILE, {"insights": None, "updated_at": None})
+    return load_json(INSIGHTS_FILE, {
+        "insights": None,
+        "updated_at": None,
+        "based_on_posts": 0,
+        "winning_patterns": [],
+        "avoid_patterns": [],
+        "boost_topics": [],
+        "paused_topics": [],    # [{"topic_id": "...", "until": "дд.мм.рррр гг:хх"}]
+        "paused_angles": [],    # [{"angle_id": "...", "topic_id": "...", "until": "дд.мм.рррр гг:хх"}]
+        "topic_fail_counts": {},   # {topic_id: к-ть різних кутів що провалились}
+        "failed_angle_ids": []    # щоб один і той самий кут не рахувався двічі
+    })
 
 
 def save_insights(data):
     save_json(INSIGHTS_FILE, data)
+
+
+def load_real_context():
+    return load_json(REAL_CONTEXT_FILE, [])
+
+
+def save_real_context(items):
+    save_json(REAL_CONTEXT_FILE, items)
+
+
+# ===== САМОНАВЧАННЯ: допоміжні функції =====
+def engagement_score(metrics):
+    """Перегляди лишаються основним сигналом — акаунт росте, охоплення зараз важливіше за все.
+    Лайки/відповіді/репости/цитати додаються зверху як бонус (репост і цитата важать більше,
+    бо це людина сама поширила пост, а не просто побачила)."""
+    if not metrics:
+        return 0
+    return (
+        metrics.get("views", 0)
+        + metrics.get("likes", 0)
+        + metrics.get("replies", 0) * 2
+        + metrics.get("reposts", 0) * 3
+        + metrics.get("quotes", 0) * 3
+    )
+
+
+def post_age_hours(post):
+    try:
+        post_time = datetime.strptime(post["timestamp"], "%d.%m.%Y %H:%M")
+    except Exception:
+        return None
+    return (datetime.now() - post_time).total_seconds() / 3600
+
+
+def is_paused(topic_id, angle_id, state):
+    """Деталізована, обчислена кодом (не GPT) перевірка чи ця тема/кут зараз на паузі."""
+    now = datetime.now()
+    for p in state.get("paused_topics", []):
+        if p.get("topic_id") == topic_id:
+            try:
+                if now < datetime.strptime(p["until"], "%d.%m.%Y %H:%M"):
+                    return True, f"тема '{topic_id}' на паузі до {p['until']}"
+            except Exception:
+                continue
+    for a in state.get("paused_angles", []):
+        if a.get("angle_id") == angle_id:
+            try:
+                if now < datetime.strptime(a["until"], "%d.%m.%Y %H:%M"):
+                    return True, f"кут '{angle_id}' на паузі до {a['until']}"
+            except Exception:
+                continue
+    return False, None
+
+
+def active_pause_summary(state):
+    now = datetime.now()
+    lines = []
+    for p in state.get("paused_topics", []):
+        try:
+            if now < datetime.strptime(p["until"], "%d.%m.%Y %H:%M"):
+                lines.append(f"тема '{p['topic_id']}' (до {p['until']})")
+        except Exception:
+            continue
+    for a in state.get("paused_angles", []):
+        try:
+            if now < datetime.strptime(a["until"], "%d.%m.%Y %H:%M"):
+                lines.append(f"кут '{a['angle_id']}' (до {a['until']})")
+        except Exception:
+            continue
+    return lines
 
 
 # ===== МЕТРИКИ =====
@@ -277,110 +369,291 @@ def update_metrics():
 
 # ===== АНАЛІЗ І НАВЧАННЯ =====
 def analyze_and_learn():
-    """Аналізує які пости працюють краще і оновлює рекомендації"""
+    """Аналізує які пости працюють краще, деталізовано (в коді, не GPT) паузить теми/кути
+    які реально провалились, і оновлює структуровані рекомендації для генерації нових постів."""
     posts = load_log()
-    posts_with_metrics = [
-        p for p in posts
-        if p.get("metrics") and p.get("text") and p.get("status") == "published"
-    ]
+    eligible = []
+    for p in posts:
+        if p.get("status") != "published" or not p.get("metrics") or not p.get("text"):
+            continue
+        age = post_age_hours(p)
+        if age is None or age < ANALYSIS_MIN_AGE_HOURS:
+            continue
+        eligible.append(p)
 
-    if len(posts_with_metrics) < 5:
-        print(f"Недостатньо даних для аналізу ({len(posts_with_metrics)}/5 постів)")
+    if len(eligible) < MIN_POSTS_FOR_ANALYSIS:
+        print(f"Недостатньо даних для аналізу ({len(eligible)}/{MIN_POSTS_FOR_ANALYSIS} "
+              f"постів старших {ANALYSIS_MIN_AGE_HOURS}г)")
         return
 
-    sorted_posts = sorted(
-        posts_with_metrics,
-        key=lambda x: x["metrics"].get("views", 0),
-        reverse=True
-    )
+    for p in eligible:
+        p["_score"] = engagement_score(p["metrics"])
 
-    top = sorted_posts[:3]
-    bottom = sorted_posts[-3:]
+    sorted_posts = sorted(eligible, key=lambda x: x["_score"], reverse=True)
+    sample_size = max(1, min(5, len(sorted_posts) // 2))
+    top = sorted_posts[:sample_size]
+    bottom = sorted_posts[-sample_size:]
+
+    scores_sorted = sorted(p["_score"] for p in eligible)
+    n = len(scores_sorted)
+    median_score = (scores_sorted[n // 2] if n % 2 == 1
+                     else (scores_sorted[n // 2 - 1] + scores_sorted[n // 2]) / 2)
+    median_score = max(median_score, 1)
+
+    # --- деталізована hard-zero пауза, порахована кодом, а не GPT ---
+    state = load_insights()
+    paused_topics = state.get("paused_topics", [])
+    paused_angles = state.get("paused_angles", [])
+    topic_fail_counts = dict(state.get("topic_fail_counts", {}))
+    failed_angle_ids = set(state.get("failed_angle_ids", []))
+
+    def until_str(days):
+        return (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y %H:%M")
+
+    new_hard_zero = []
+    for p in eligible:
+        angle_id = p.get("angle_id")
+        topic_id = p.get("topic_id")
+        if not angle_id or angle_id == "unknown":
+            continue
+
+        m = p.get("metrics", {})
+        raw_interactions = m.get("likes", 0) + m.get("replies", 0) + m.get("reposts", 0) + m.get("quotes", 0)
+        is_hard_zero = p["_score"] <= median_score * HARD_ZERO_RATIO and raw_interactions == 0
+
+        if is_hard_zero and angle_id not in failed_angle_ids:
+            new_hard_zero.append((topic_id, angle_id))
+            failed_angle_ids.add(angle_id)
+
+            if not any(a.get("angle_id") == angle_id for a in paused_angles):
+                paused_angles.append({"angle_id": angle_id, "topic_id": topic_id, "until": until_str(ANGLE_PAUSE_DAYS)})
+
+            if topic_id and topic_id != "unknown":
+                topic_fail_counts[topic_id] = topic_fail_counts.get(topic_id, 0) + 1
+                if (topic_fail_counts[topic_id] >= TOPIC_FAIL_THRESHOLD
+                        and not any(t.get("topic_id") == topic_id for t in paused_topics)):
+                    paused_topics.append({"topic_id": topic_id, "until": until_str(TOPIC_PAUSE_DAYS)})
+
+    now = datetime.now()
+
+    def not_expired(item):
+        try:
+            return datetime.strptime(item["until"], "%d.%m.%Y %H:%M") > now
+        except Exception:
+            return False
+
+    paused_topics = [t for t in paused_topics if not_expired(t)]
+    paused_angles = [a for a in paused_angles if not_expired(a)]
 
     def format_post(p):
         m = p.get("metrics", {})
         return (
-            f"Тип: {p.get('type', '?')} | "
-            f"Перегляди: {m.get('views', 0)} | "
-            f"Лайки: {m.get('likes', 0)} | "
-            f"Репости: {m.get('reposts', 0)}\n"
+            f"Тип: {p.get('type', '?')} | Тема: {p.get('topic_id', '?')} | Кут: {p.get('angle_id', '?')} | "
+            f"Скор: {p['_score']} (перегляди {m.get('views', 0)}, лайки {m.get('likes', 0)}, "
+            f"відповіді {m.get('replies', 0)}, репости {m.get('reposts', 0)}, цитати {m.get('quotes', 0)})\n"
             f"Текст: {p['text']}"
         )
 
     prompt = f"""Проаналізуй пости Threads акаунту розробника сайтів @hodakov.digital.
+Скор = перегляди + лайки + відповіді*2 + репости*3 + цитати*3. Охоплення (перегляди) — головний
+сигнал, бо акаунт зараз росте і потрібна саме кількість людей що побачили пост; реакції додаються
+зверху як бонус, а не замінюють перегляди.
 
-ТОП ПОСТИ (найбільше переглядів):
+ТОП ПОСТИ ЗА СКОРОМ:
 {chr(10).join([format_post(p) for p in top])}
 
-СЛАБКІ ПОСТИ (найменше переглядів):
+СЛАБКІ ПОСТИ ЗА СКОРОМ:
 {chr(10).join([format_post(p) for p in bottom])}
 
-Дай 3-5 коротких конкретних висновків:
-- Які теми і формати дають більше охоплення
-- Що треба уникати
-- Що конкретно змінити в стилі
-
-Відповідай по-українськи. Тільки конкретні спостереження, без загальних порад."""
+Поверни відповідь СТРОГО у форматі JSON, без пояснень навколо:
+{{
+  "winning_patterns": ["коротке конкретне спостереження про те що працює", "..."],
+  "avoid_patterns": ["коротке конкретне спостереження про те чого уникати", "..."],
+  "boost_topics": ["тема чи topic_id який варто розвивати далі", "..."],
+  "writer_summary": "3-5 речень зрозумілого тексту з конкретними висновками для того хто пише наступні пости"
+}}
+Тільки конкретні спостереження на основі цих даних, без загальних порад типу "публікуйте частіше"."""
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=400,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=600,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}]
+        )
+        parsed = json.loads(response.choices[0].message.content.strip())
+    except Exception as e:
+        print(f"Не вдалось розпарсити GPT-аналіз, зберігаю тільки код-обчислені паузи: {e}")
+        parsed = {}
 
-    insights_text = response.choices[0].message.content.strip()
+    winning_patterns = parsed.get("winning_patterns") or state.get("winning_patterns", [])
+    avoid_patterns = parsed.get("avoid_patterns") or state.get("avoid_patterns", [])
+    boost_topics = parsed.get("boost_topics") or state.get("boost_topics", [])
+    writer_summary = parsed.get("writer_summary") or state.get("insights")
 
     save_insights({
-        "insights": insights_text,
+        "insights": writer_summary,
         "updated_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "based_on_posts": len(posts_with_metrics)
+        "based_on_posts": len(eligible),
+        "winning_patterns": winning_patterns,
+        "avoid_patterns": avoid_patterns,
+        "boost_topics": boost_topics,
+        "paused_topics": paused_topics,
+        "paused_angles": paused_angles,
+        "topic_fail_counts": topic_fail_counts,
+        "failed_angle_ids": list(failed_angle_ids)
     })
 
-    print(f"\nАналіз оновлено на основі {len(posts_with_metrics)} постів:")
-    print(insights_text)
+    print(f"\nАналіз оновлено на основі {len(eligible)} постів (старших {ANALYSIS_MIN_AGE_HOURS}г).")
+    if new_hard_zero:
+        print(f"Нові кути на паузі (hard zero, 0 взаємодій): {new_hard_zero}")
+    if writer_summary:
+        print(writer_summary)
 
 
 # ===== ГЕНЕРАЦІЯ ПОСТІВ =====
 def build_system_prompt():
-    """Будує промпт з урахуванням накопичених інсайтів"""
+    """Будує промпт з урахуванням накопичених структурованих інсайтів і активних пауз."""
     prompt = BASE_SYSTEM_PROMPT
-
     insights_data = load_insights()
+    extra_parts = []
+
     if insights_data.get("insights"):
-        prompt += f"""
+        extra_parts.append(
+            f"АНАЛІЗ ПОПЕРЕДНІХ ПОСТІВ (що реально працює для цього акаунту):\n{insights_data['insights']}"
+        )
+    if insights_data.get("winning_patterns"):
+        extra_parts.append(
+            "ЩО ТОЧНО ПРАЦЮЄ (з реальних даних):\n"
+            + "\n".join(f"- {w}" for w in insights_data["winning_patterns"])
+        )
+    if insights_data.get("avoid_patterns"):
+        extra_parts.append(
+            "ЧОГО УНИКАТИ (з реальних даних):\n"
+            + "\n".join(f"- {a}" for a in insights_data["avoid_patterns"])
+        )
+    if insights_data.get("boost_topics"):
+        extra_parts.append(
+            "ТЕМИ ЯКІ ВАРТО РОЗВИВАТИ ДАЛІ:\n"
+            + "\n".join(f"- {t}" for t in insights_data["boost_topics"])
+        )
 
-АНАЛІЗ ПОПЕРЕДНІХ ПОСТІВ (що реально працює для цього акаунту):
-{insights_data['insights']}
+    paused = active_pause_summary(insights_data)
+    if paused:
+        extra_parts.append(
+            "НЕ ПИШИ ЗАРАЗ ПРО ЦІ ТЕМИ/КУТИ (вони на паузі — реально погано заходили):\n"
+            + "\n".join(f"- {p}" for p in paused)
+        )
 
-Враховуй ці спостереження при написанні нового поста."""
+    if extra_parts:
+        prompt += "\n\n" + "\n\n".join(extra_parts) + "\n\nВраховуй ці спостереження при написанні нового поста."
 
     return prompt
 
 
-def generate_post():
-    pillar = random.choice(CONTENT_PILLARS)
-    system_prompt = build_system_prompt()
+STRUCTURED_OUTPUT_INSTRUCTIONS = """
+Поверни відповідь СТРОГО у форматі JSON (без markdown, без пояснень навколо), з полями:
+{
+  "post_text": "готовий текст поста, саме той що піде в публікацію",
+  "topic_id": "короткий slug теми латиницею, напр. online_booking чи ai_token_saving",
+  "angle_id": "короткий slug конкретного кута/ситуації всередині теми, напр. bookings_lost_in_direct",
+  "hook_type": "question / direct_address / contrarian / cold_open / specific_detail",
+  "audience": "коротко хто цільова аудиторія цього поста"
+}
+topic_id і angle_id придумай сам виходячи з того, про що реально цей пост — вони потрібні лише для
+внутрішньої аналітики і ніколи не з'являються в самому пості."""
 
+
+def pick_pillar_and_prompt():
+    """Обирає пиллар і будує промпт-завдання. Для storytelling_client підставляє реальну
+    ситуацію від Романа (якщо додана через "контекст: ..." в боті) — щоб не вигадувати клієнтів."""
+    pillar = random.choice(CONTENT_PILLARS)
+    pillar_prompt = pillar["prompt"]
+
+    if pillar["type"] == "storytelling_client":
+        context_list = load_real_context()
+        if context_list:
+            note = context_list.pop(0)
+            save_real_context(context_list)
+            pillar_prompt += f"\n\nРеальна ситуація для цього поста (використай саме її, нічого не вигадуй додатково): {note}"
+        else:
+            pillar_prompt += (
+                "\n\nЗараз немає нової реальної ситуації від Романа. НЕ вигадуй конкретного діалогу "
+                "чи цитати клієнта яких насправді не було. Замість цього напиши загальне спостереження "
+                "чи роздум від першої особи про типову робочу ситуацію, без вигаданого конкретного "
+                "клієнта чи вигаданої репліки."
+            )
+
+    return pillar, pillar_prompt
+
+
+def generate_post():
+    """Генерує пост зі структурованими метаданими (тема/кут/тип хука/аудиторія).
+    Якщо GPT видав тему чи кут які зараз на паузі (реально погано заходили) — перегенеровує,
+    до 3 спроб. Пауза перевіряється кодом (deterministic), не залишається на розсуд GPT."""
+    system_prompt = build_system_prompt() + "\n\n" + STRUCTURED_OUTPUT_INSTRUCTIONS
+    state = load_insights()
     client = OpenAI(api_key=OPENAI_API_KEY)
+
+    last_result = None
+    for attempt in range(3):
+        pillar, pillar_prompt = pick_pillar_and_prompt()
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=500,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": pillar_prompt}
+                ]
+            )
+            parsed = json.loads(response.choices[0].message.content.strip())
+        except Exception as e:
+            print(f"Не вдалось розпарсити структурований пост (спроба {attempt + 1}): {e}")
+            continue
+
+        post_text = (parsed.get("post_text") or "").strip()
+        if not post_text:
+            continue
+
+        topic_id = parsed.get("topic_id", "unknown")
+        angle_id = parsed.get("angle_id", "unknown")
+        hook_type = parsed.get("hook_type", "unknown")
+        audience = parsed.get("audience", "unknown")
+
+        last_result = (post_text, pillar["type"], topic_id, angle_id, hook_type, audience)
+
+        paused, reason = is_paused(topic_id, angle_id, state)
+        if not paused:
+            return last_result
+
+        print(f"Тема/кут з паузи ({reason}) — перегенеровую (спроба {attempt + 1})")
+
+    if last_result:
+        print("Не вдалось уникнути паузованої теми за 3 спроби — публікую останню згенеровану версію")
+        return last_result
+
+    # Крайній фолбек без структурованого виводу, щоб публікація не зламалась зовсім
+    pillar, pillar_prompt = pick_pillar_and_prompt()
     response = client.chat.completions.create(
         model="gpt-4o",
         max_tokens=400,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": pillar["prompt"]}
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": pillar_prompt}
         ]
     )
-
     text = response.choices[0].message.content.strip()
-    return text, pillar["type"]
+    return text, pillar["type"], "unknown", "unknown", "unknown", "unknown"
 
 
 # ===== TELEGRAM (кросспост експертних постів) =====
 def generate_telegram_post(threads_text, pillar_type):
     """Розширює короткий експертний Threads-пост у повноцінний Telegram-пост."""
-    system_prompt = """Ти пишеш пост для Telegram каналу Богдана Ходакова (@hodakov_digital),
-розробника сайтів і додатків. Це той самий канал куди Богдан веде людей з Threads.
+    system_prompt = """Ти пишеш пост для Telegram каналу Романа (@hodakov_digital),
+розробника сайтів і додатків. Це той самий канал куди Роман веде людей з Threads.
 
 Тобі дають короткий пост з Threads. Розпиши цю саму думку ширше і конкретніше:
 додай реальний приклад, конкретну деталь або крок, який людина може забрати собі.
@@ -593,11 +866,12 @@ def post_to_threads():
     print(f"\n[{timestamp}] Генерую пост...")
 
     try:
-        text, pillar_type = generate_post()
+        text, pillar_type, topic_id, angle_id, hook_type, audience = generate_post()
         is_expert = pillar_type in EXPERT_TYPES
         published_text = text + TELEGRAM_CTA if is_expert else text
 
-        print(f"Тип: {pillar_type} {'(експертний → CTA + Telegram)' if is_expert else ''}")
+        print(f"Тип: {pillar_type} | тема: {topic_id} | кут: {angle_id} "
+              f"{'(експертний → CTA + Telegram)' if is_expert else ''}")
         print(f"Текст:\n{'-'*40}\n{published_text}\n{'-'*40}")
 
         creation_id = create_threads_container(published_text)
@@ -608,6 +882,10 @@ def post_to_threads():
         posts.append({
             "timestamp": timestamp,
             "type": pillar_type,
+            "topic_id": topic_id,
+            "angle_id": angle_id,
+            "hook_type": hook_type,
+            "audience": audience,
             "text": published_text,
             "post_id": post_id,
             "status": "published"
@@ -655,14 +933,15 @@ def answer_bot_question(question):
 
         def fmt_post(p):
             m = p.get("metrics", {})
-            return (f"[{p.get('type', '?')}] перегляди {m.get('views', 0)}, лайки {m.get('likes', 0)}, "
-                    f"репости {m.get('reposts', 0)}: {p.get('text', '')[:200]}")
+            return (f"[{p.get('type', '?')} / тема: {p.get('topic_id', '?')}] скор {engagement_score(m)} "
+                    f"(перегляди {m.get('views', 0)}, лайки {m.get('likes', 0)}, "
+                    f"репости {m.get('reposts', 0)}): {p.get('text', '')[:200]}")
 
         def fmt_video(v):
             return (f"[{v.get('platform')}] перегляди {v.get('views', '-')}, лайки {v.get('likes', '-')}, "
                     f"коментарі {v.get('comments', '-')}: {v.get('url', '')}")
 
-        sorted_posts = sorted(with_metrics, key=lambda p: p["metrics"].get("views", 0), reverse=True)
+        sorted_posts = sorted(with_metrics, key=lambda p: engagement_score(p.get("metrics")), reverse=True)
 
         context = ""
         if sorted_posts:
@@ -697,31 +976,63 @@ def answer_bot_question(question):
         alert_error("відповідь на питання в боті", e)
 
 
+RANDOM_ASSOCIATION_WORDS = [
+    "космос", "кулінарія", "спорт", "музика", "мода", "тварини", "подорожі",
+    "погода", "гроші", "історія", "медицина", "кіно", "садівництво", "спогади дитинства",
+    "весілля", "автомобілі", "море", "гори", "школа", "сон"
+]
+
+
 def generate_content_ideas(count=10):
-    """Генерує нові ідеї для контент-плану на основі попереднього аналізу і топових постів.
-    Дописує в CONTENT_PLAN_FILE (та сама таблиця що на вкладці 'Контент-план' в /dashboard)
-    і повертає список нових текстів ідей."""
+    """Генерує нові ідеї для контент-плану.
+
+    Техніка: беремо нішу (сайти для малого бізнесу, клієнти, AI в розробці) і з'єднуємо
+    з випадковим словом далеким за змістом — неочевидний зв'язок часто дає найкращі ідеї,
+    ніж пряме "напиши пост про X".
+
+    Верифікація: кожна ідея обов'язково звіряється з тим що вже реально показало результат
+    (топові пости за переглядами + накопичений аналіз) — якщо зв'язок не резонує з перевіреним
+    паттерном, GPT має підібрати інший, а не видавати ідею що ні на що не спирається."""
     insights = load_insights()
     posts = load_log()
-    top_texts = [p["text"] for p in posts if p.get("metrics") and p.get("text")][-10:]
+    posts_with_metrics = [p for p in posts if p.get("metrics") and p.get("text")]
+    top_posts = sorted(posts_with_metrics, key=lambda p: engagement_score(p["metrics"]), reverse=True)
+    top_texts = [p["text"] for p in top_posts[:8]]
 
     context = ""
     if insights.get("insights"):
-        context += f"Аналіз того що вже добре заходить:\n{insights['insights']}\n\n"
+        context += f"Аналіз того що вже добре заходить (перевірений паттерн):\n{insights['insights']}\n\n"
+    if insights.get("boost_topics"):
+        context += "Теми які варто розвивати далі:\n" + "\n".join(f"- {t}" for t in insights["boost_topics"]) + "\n\n"
     if top_texts:
-        context += "Приклади постів що вже публікувались:\n" + "\n---\n".join(top_texts[:5])
+        context += "ТОП пости за реальними переглядами (це і є перевірка — нове має резонувати з цим):\n"
+        context += "\n---\n".join(top_texts)
+    if not context:
+        context = ("Даних по метриках ще нема. Орієнтуйся на больову точку аудиторії: власники малого "
+                    "бізнесу які бояться що розробник кине проект або тягнутиме місяцями.")
+
+    random_words = random.sample(RANDOM_ASSOCIATION_WORDS, min(6, len(RANDOM_ASSOCIATION_WORDS)))
 
     prompt = f"""Ти генеруєш контент-план для Threads акаунту розробника сайтів @hodakov.digital
 (робить сайти з AI за 5-7 днів).
 
+ТЕХНІКА ГЕНЕРАЦІЇ: візьми нішу (сайти для малого бізнесу, клієнти, AI в розробці) і з'єднай
+її з одним із випадкових слів нижче. Шукай неочевидний, не буквальний зв'язок — не "сайт схожий
+на X", а метафору чи ситуацію яка через це слово розкриває нішу з несподіваного боку.
+
+Випадкові слова для з'єднання: {', '.join(random_words)}
+
 {context}
 
-Згенеруй {count} нових креативних ідей для постів, які спираються на те що вже добре заходило,
-але не повторюють один в один старі пости. Ідеї мають бути конкретні, з реальним потенціалом
-на охоплення — не загальні теми типу "пост про AI", а конкретна ситуація чи думка яку можна
-одразу перетворити в пост.
+ВЕРИФІКАЦІЯ (обов'язково): кожна ідея має резонувати з тим що показано вище як перевірений
+паттерн — той самий тип гумору, той самий больовий нерв, той самий формат що вже спрацював.
+Якщо зв'язок з випадковим словом не резонує з перевіреним паттерном — підбери інший зв'язок,
+не видавай ідею яка ні на що не спирається.
 
-Формат відповіді — рівно {count} рядків, без нумерації, без зайвого тексту, кожен рядок це одна ідея."""
+Згенеруй {count} ідей. Кожна ідея конкретна, готова одразу перетворитись в пост чи відео —
+не загальна тема типу "пост про AI", а конкретна ситуація чи думка.
+
+Формат відповіді — рівно {count} рядків, без нумерації, без пояснення техніки, кожен рядок це одна ідея."""
 
     client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
@@ -754,8 +1065,12 @@ HELP_TEXT = (
     "Аналіз — останній аналіз того що добре заходить, текстом прямо в чат.\n"
     "Нові ідеї — згенерувати ще ідей для контент-плану.\n\n"
     "Просто питання текстом (без /) — бот відповість спираючись на реальну статистику акаунту.\n\n"
+    "Напиши 'контекст: ...' з реальною ситуацією з роботи — вона піде в наступний пост-історію "
+    "про клієнта замість вигаданої.\n\n"
     "Сповіщення про лідів і саморекламні тредси, а також запити на публікацію в Telegram-канал "
-    "приходять самі, з кнопками підтвердження."
+    "приходять самі, з кнопками підтвердження.\n\n"
+    "Алгоритм написання постів сам аналізує статистику, паузить теми і кути які реально погано "
+    "заходять (0 взаємодій), і підказує собі що краще писати далі."
 )
 
 
@@ -985,9 +1300,29 @@ def poll_telegram_updates():
         if text in ("/analysis", "Аналіз"):
             insights = load_insights()
             if insights.get("insights"):
-                send_telegram_dm(f"Аналіз (оновлено {insights.get('updated_at', '?')}):\n\n{insights['insights']}")
+                parts = [f"Аналіз (оновлено {insights.get('updated_at', '?')}, "
+                         f"на основі {insights.get('based_on_posts', '?')} постів):\n\n{insights['insights']}"]
+                if insights.get("winning_patterns"):
+                    parts.append("Що працює:\n" + "\n".join(f"- {w}" for w in insights["winning_patterns"]))
+                if insights.get("avoid_patterns"):
+                    parts.append("Чого уникати:\n" + "\n".join(f"- {a}" for a in insights["avoid_patterns"]))
+                paused = active_pause_summary(insights)
+                if paused:
+                    parts.append("Зараз на паузі (погано заходили):\n" + "\n".join(f"- {p}" for p in paused))
+                send_telegram_dm("\n\n".join(parts))
             else:
-                send_telegram_dm("Аналізу ще нема — з'явиться після 5+ опублікованих постів з метриками.")
+                send_telegram_dm(f"Аналізу ще нема — з'явиться після {MIN_POSTS_FOR_ANALYSIS}+ "
+                                  f"опублікованих постів з метриками (старших {ANALYSIS_MIN_AGE_HOURS}г).")
+            continue
+
+        # "контекст: ..." — реальна ситуація для storytelling_client, щоб не вигадувати клієнтів
+        if text.lower().startswith("контекст:"):
+            note = text.split(":", 1)[1].strip()
+            if note:
+                items = load_real_context()
+                items.append(note)
+                save_real_context(items)
+                send_telegram_dm("Записав. Використаю в наступному пості-історії про клієнта.")
             continue
 
         # Нові ідеї — генерує і одразу показує текстом (та ж таблиця що і в /dashboard)
