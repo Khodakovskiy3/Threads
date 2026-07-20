@@ -72,6 +72,9 @@ ANALYSIS_MIN_AGE_HOURS = 24       # враховуємо в аналізі ті�
 ANGLE_PAUSE_DAYS = 14             # на скільки днів ставиться на паузу конкретний кут (angle_id) після hard zero
 TOPIC_PAUSE_DAYS = 21             # на скільки днів ставиться на паузу вся тема (topic_id)
 HARD_ZERO_RATIO = 0.2             # поріг: скор <= медіана*це І нуль лайків/відповідей/репостів/цитат = hard zero
+ABSOLUTE_LOW_VIEWS = 30            # незалежно від медіани: перегляди нижче цього і 0 взаємодій = теж hard zero
+                                    # (захист від ситуації коли майже ВСІ пости слабкі — медіана сама занижена
+                                    # і відносний поріг нічого не ловить)
 TOPIC_FAIL_THRESHOLD = 2          # скільки різних кутів однієї теми мають "провалитись", щоб паузити всю тему
 
 LEAD_KEYWORDS = [
@@ -110,7 +113,8 @@ CONTENT_PILLARS = [
     {
         "type": "observation_business",
         "prompt": """Напиши коротке спостереження про малий бізнес і сайти.
-Щось що змусить власника кав'ярні, салону або курсів впізнати свою ситуацію.
+Щось що змусить власника впізнати свою ситуацію — це може бути будь-яка ніша малого бізнесу,
+не обов'язково кав'ярня чи салон краси (дивись список ніш нижче в цьому промті, якщо є).
 Без реклами. Просто як 'це про мене' момент."""
     },
     {
@@ -148,6 +152,55 @@ CONTENT_PILLARS = [
 а не поступовий розгін до суті."""
     }
 ]
+
+# Пул ніш малого бізнесу для прикладів в постах. (label, стем-слово для пошуку в тексті останніх постів,
+# щоб не повторювати ту саму нішу — кав'ярня явно передомінувала раніше і пости стали одноманітними).
+AUDIENCE_NICHES = [
+    ("кав'ярня", "кав'яр"),
+    ("перукарня чи барбершоп", "перукар"),
+    ("салон краси чи манікюр", "манікюр"),
+    ("автосервіс", "автосерв"),
+    ("стоматологія", "стоматол"),
+    ("ветклініка", "ветклін"),
+    ("фітнес-студія чи тренажерний зал", "фітнес"),
+    ("репетитор чи мовна школа", "репетитор"),
+    ("флористика чи квітковий магазин", "флорист"),
+    ("кондитерська чи пекарня", "кондитер"),
+    ("магазин одягу", "магазин одяг"),
+    ("майстерня з ремонту техніки", "ремонт техн"),
+    ("юридичні чи бухгалтерські послуги", "юрист"),
+    ("будівельна бригада чи ремонт квартир", "будівель"),
+    ("фотограф", "фотограф"),
+    ("автошкола", "автошкол"),
+    ("організація свят чи event-агенція", "агенці"),
+    ("клінінгова служба", "клінінг"),
+    ("шиномонтаж", "шиномонт"),
+    ("масажний кабінет", "масаж"),
+]
+
+
+def recent_used_niches(n=6):
+    """Дивиться на останні N опублікованих постів і повертає ніші які там вже згадувались —
+    щоб не писати знову і знову про кав'ярню чи будь-яку одну нішу поспіль."""
+    posts = [p for p in load_log() if p.get("status") == "published" and p.get("text")]
+    recent_text = " ".join(p["text"].lower() for p in posts[-n:])
+    return [label for label, stem in AUDIENCE_NICHES if stem in recent_text]
+
+
+def diversity_instruction():
+    """Будує інструкцію яка забороняє повторювати нещодавно використані ніші і підказує нові."""
+    used = recent_used_niches()
+    unused = [label for label, _ in AUDIENCE_NICHES if label not in used]
+    pool = unused if unused else [label for label, _ in AUDIENCE_NICHES]
+    suggestions = random.sample(pool, min(4, len(pool)))
+
+    if used:
+        return (f"\n\nОстанні пости вже були про: {', '.join(used)}. У ЦЬОМУ пості візьми ІНШУ нішу малого "
+                f"бізнесу, не ту саму — наприклад: {', '.join(suggestions)}. Якщо в пості взагалі не потрібен "
+                f"конкретний приклад бізнесу, просто пропусти цю вказівку.")
+    return (f"\n\nЯкщо в пості потрібен приклад ніші малого бізнесу — не бери завжди кав'ярню, спробуй щось "
+            f"з цього: {', '.join(suggestions)}.")
+
 
 BASE_SYSTEM_PROMPT = """Ти пишеш пости для Threads від імені Романа (@hodakov.digital).
 Роман розробляє сайти і додатки з AI за 5-7 днів від дизайну до запуску.
@@ -411,15 +464,22 @@ def analyze_and_learn():
         return (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y %H:%M")
 
     new_hard_zero = []
+    total_hard_zero_count = 0
     for p in eligible:
         angle_id = p.get("angle_id")
         topic_id = p.get("topic_id")
-        if not angle_id or angle_id == "unknown":
-            continue
 
         m = p.get("metrics", {})
         raw_interactions = m.get("likes", 0) + m.get("replies", 0) + m.get("reposts", 0) + m.get("quotes", 0)
-        is_hard_zero = p["_score"] <= median_score * HARD_ZERO_RATIO and raw_interactions == 0
+        is_hard_zero = (
+            (p["_score"] <= median_score * HARD_ZERO_RATIO or m.get("views", 0) <= ABSOLUTE_LOW_VIEWS)
+            and raw_interactions == 0
+        )
+        if is_hard_zero:
+            total_hard_zero_count += 1
+
+        if not angle_id or angle_id == "unknown":
+            continue
 
         if is_hard_zero and angle_id not in failed_angle_ids:
             new_hard_zero.append((topic_id, angle_id))
@@ -433,6 +493,9 @@ def analyze_and_learn():
                 if (topic_fail_counts[topic_id] >= TOPIC_FAIL_THRESHOLD
                         and not any(t.get("topic_id") == topic_id for t in paused_topics)):
                     paused_topics.append({"topic_id": topic_id, "until": until_str(TOPIC_PAUSE_DAYS)})
+
+    # якщо провалюється більшість постів — це не проблема однієї теми, а системна проблема формату
+    systemic_failure = total_hard_zero_count / len(eligible) > 0.5
 
     now = datetime.now()
 
@@ -454,10 +517,18 @@ def analyze_and_learn():
             f"Текст: {p['text']}"
         )
 
+    systemic_note = ""
+    if systemic_failure:
+        systemic_note = (f"\n\nУВАГА: {total_hard_zero_count} з {len(eligible)} постів ({total_hard_zero_count*100//len(eligible)}%) "
+                          f"взагалі не набрали перегляди і 0 взаємодій. Це НЕ проблема однієї теми — це системна "
+                          f"проблема формату/хука/стилю. Врахуй це в avoid_patterns і writer_summary: треба радикальніше "
+                          f"змінити підхід, не просто уникати конкретних тем.")
+
     prompt = f"""Проаналізуй пости Threads акаунту розробника сайтів @hodakov.digital.
 Скор = перегляди + лайки + відповіді*2 + репости*3 + цитати*3. Охоплення (перегляди) — головний
 сигнал, бо акаунт зараз росте і потрібна саме кількість людей що побачили пост; реакції додаються
 зверху як бонус, а не замінюють перегляди.
+{systemic_note}
 
 ТОП ПОСТИ ЗА СКОРОМ:
 {chr(10).join([format_post(p) for p in top])}
@@ -491,6 +562,12 @@ def analyze_and_learn():
     avoid_patterns = parsed.get("avoid_patterns") or state.get("avoid_patterns", [])
     boost_topics = parsed.get("boost_topics") or state.get("boost_topics", [])
     writer_summary = parsed.get("writer_summary") or state.get("insights")
+
+    if systemic_failure:
+        forced_note = (f"Більшість постів ({total_hard_zero_count}/{len(eligible)}) взагалі не набирають "
+                        f"перегляди — потрібно суттєво міняти хук і формат, не тільки уникати окремих тем.")
+        if forced_note not in avoid_patterns:
+            avoid_patterns = [forced_note] + list(avoid_patterns)
 
     save_insights({
         "insights": writer_summary,
@@ -570,6 +647,9 @@ def pick_pillar_and_prompt():
     ситуацію від Романа (якщо додана через "контекст: ..." в боті) — щоб не вигадувати клієнтів."""
     pillar = random.choice(CONTENT_PILLARS)
     pillar_prompt = pillar["prompt"]
+
+    if pillar["type"] != "ai_dev":
+        pillar_prompt += diversity_instruction()
 
     if pillar["type"] == "storytelling_client":
         context_list = load_real_context()
