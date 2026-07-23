@@ -28,6 +28,8 @@ TELEGRAM_LOG_FILE = "telegram_log"
 PENDING_CHANNEL_POSTS_FILE = "pending_channel_posts"
 VIDEO_STATS_FILE = "video_stats"  # та сама таблиця що заповнює dashboard.py
 CONTENT_PLAN_FILE = "content_plan"  # той самий план що і на вкладці dashboard.py
+POSTING_JITTER_FILE = "posting_jitter"  # рандомізований час наступної публікації
+TRENDS_FILE = "content_trends"  # щоденний аналіз трендів у ніші
 
 # Постійна клавіатура внизу чату — щоб не пам'ятати команди напам'ять
 MAIN_KEYBOARD = {
@@ -569,6 +571,26 @@ def analyze_and_learn():
         if forced_note not in avoid_patterns:
             avoid_patterns = [forced_note] + list(avoid_patterns)
 
+    # Генеруємо покращені версії слабких постів
+    post_improvements = state.get("post_improvements", "")
+    if bottom and len(eligible) >= MIN_POSTS_FOR_ANALYSIS:
+        try:
+            weak_samples = "\n\n".join(format_post(p) for p in bottom[:3])
+            imp_prompt = (
+                "Ось пости що не набрали охоплення (@hodakov.digital):\n\n"
+                + weak_samples
+                + "\n\nДля кожного одним рядком:\n"
+                "[Пост N] Проблема: <1 речення> | Новий хук: <перші 2-3 речення переробленого початку>"
+            )
+            imp_resp = client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=350,
+                messages=[{"role": "user", "content": imp_prompt}]
+            )
+            post_improvements = imp_resp.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Помилка генерації покращень постів: {e}")
+
     save_insights({
         "insights": writer_summary,
         "updated_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -579,7 +601,8 @@ def analyze_and_learn():
         "paused_topics": paused_topics,
         "paused_angles": paused_angles,
         "topic_fail_counts": topic_fail_counts,
-        "failed_angle_ids": list(failed_angle_ids)
+        "failed_angle_ids": list(failed_angle_ids),
+        "post_improvements": post_improvements,
     })
 
     print(f"\nАналіз оновлено на основі {len(eligible)} постів (старших {ANALYSIS_MIN_AGE_HOURS}г).")
@@ -590,6 +613,73 @@ def analyze_and_learn():
 
 
 # ===== ГЕНЕРАЦІЯ ПОСТІВ =====
+def get_next_allowed_post_time():
+    """Повертає datetime коли дозволена наступна публікація (з урахуванням рандомного джиттера)."""
+    data = load_json(POSTING_JITTER_FILE, {})
+    if data.get("next_post_allowed"):
+        try:
+            return datetime.strptime(data["next_post_allowed"], "%d.%m.%Y %H:%M")
+        except Exception:
+            pass
+    return None
+
+
+def set_next_allowed_post_time(interval_hours):
+    """Зберігає час наступної публікації з рандомним джиттером ±20 хвилин."""
+    jitter_minutes = random.randint(-20, 25)
+    actual_hours = max(0.5, interval_hours + jitter_minutes / 60)
+    next_time = datetime.now() + timedelta(hours=actual_hours)
+    save_json(POSTING_JITTER_FILE, {
+        "next_post_allowed": next_time.strftime("%d.%m.%Y %H:%M"),
+        "jitter_minutes": jitter_minutes,
+        "base_interval_hours": interval_hours,
+    })
+    print(f"Наступна публікація о {next_time.strftime('%H:%M')} (джиттер {jitter_minutes:+d}хв)")
+    return next_time
+
+
+def refresh_trend_context():
+    """Оновлює аналіз трендів у ніші раз на добу через GPT."""
+    trends_data = load_json(TRENDS_FILE, {})
+    if trends_data.get("updated_at"):
+        try:
+            last = datetime.strptime(trends_data["updated_at"], "%d.%m.%Y %H:%M")
+            if (datetime.now() - last).total_seconds() < 22 * 3600:
+                return trends_data.get("trends", "")
+        except Exception:
+            pass
+
+    today = datetime.now().strftime("%B %Y")
+    prompt = (
+        f"Ти аналітик контент-трендів для українських авторів у Threads та Instagram.\n"
+        f"Зараз {today}.\n\n"
+        "Визнач 5 конкретних трендів у нішах малого бізнесу, сайтів, AI для розробників в Україні:\n"
+        "1. Що зараз активно обговорюють власники малого бізнесу (болі, страхи, запити)\n"
+        "2. Які теми про AI-інструменти набирають охоплення серед розробників\n"
+        "3. Які формати постів (гумор, спостереження, питання) краще заходять у Threads зараз\n"
+        "4. Які болі клієнтів, що шукають розробника сайту, найактуальніші\n\n"
+        "Формат: рівно 5 рядків з конкретикою, без вступів та загальних слів."
+    )
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        trends = response.choices[0].message.content.strip()
+        save_json(TRENDS_FILE, {
+            "trends": trends,
+            "updated_at": datetime.now().strftime("%d.%m.%Y %H:%M")
+        })
+        print(f"Тренди оновлено:\n{trends}")
+        return trends
+    except Exception as e:
+        print(f"Помилка refresh_trend_context: {e}")
+        return trends_data.get("trends", "")
+
+
 def build_system_prompt():
     """Будує промпт з урахуванням накопичених структурованих інсайтів і активних пауз."""
     prompt = BASE_SYSTEM_PROMPT
@@ -621,6 +711,13 @@ def build_system_prompt():
         extra_parts.append(
             "НЕ ПИШИ ЗАРАЗ ПРО ЦІ ТЕМИ/КУТИ (вони на паузі — реально погано заходили):\n"
             + "\n".join(f"- {p}" for p in paused)
+        )
+
+    # Тренди у ніші (оновлюються щодня)
+    trends = load_json(TRENDS_FILE, {}).get("trends", "")
+    if trends:
+        extra_parts.append(
+            "АКТУАЛЬНІ ТРЕНДИ У НІШІ (враховуй при виборі теми та формату):\n" + trends
         )
 
     if extra_parts:
@@ -937,11 +1034,20 @@ def post_to_threads():
         print(f"\n[{timestamp}] Зараз {kyiv_hour}:00 за Києвом — вікно 23:00-06:00, не постимо")
         return
 
-    hours_since = hours_since_last_post()
-    if hours_since is not None and hours_since < interval:
-        print(f"\n[{timestamp}] Останній пост був {hours_since:.1f} год тому, для {kyiv_hour}:00 "
-              f"потрібно {interval} год між постами — пропускаю")
+    # Перевірка рандомізованого часу наступної публікації
+    next_allowed = get_next_allowed_post_time()
+    if next_allowed and datetime.now() < next_allowed:
+        print(f"\n[{timestamp}] Наступна публікація о {next_allowed.strftime('%H:%M')} — пропускаю")
         return
+
+    # Fallback якщо jitter-файл порожній
+    if next_allowed is None:
+        hours_since = hours_since_last_post()
+        if hours_since is not None and hours_since < interval:
+            remaining = interval - hours_since
+            set_next_allowed_post_time(remaining)
+            print(f"\n[{timestamp}] Ставлю рандомний таймер")
+            return
 
     print(f"\n[{timestamp}] Генерую пост...")
 
@@ -972,6 +1078,9 @@ def post_to_threads():
         })
         save_log(posts)
         print(f"Опубліковано! ID: {post_id}")
+
+        # Ставимо рандомізований час наступної публікації
+        set_next_allowed_post_time(interval)
 
         if is_expert:
             crosspost_to_telegram(text, pillar_type)
@@ -1481,6 +1590,7 @@ schedule.every(4).hours.do(daily_maintenance)          # аналіз кожні
 schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
 schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка натискань кнопок
+schedule.every(24).hours.do(refresh_trend_context)    # оновлення трендів у ніші
 
 def run_dashboard_in_background():
     """Стартує Flask-панель (dashboard.py) в окремому потоці того самого процесу —
@@ -1499,6 +1609,7 @@ if __name__ == "__main__":
     init_db()
     register_bot_commands()
     threading.Thread(target=run_dashboard_in_background, daemon=True).start()
+    refresh_trend_context()  # Завантажуємо тренди при старті
     print("Перевірка при старті (пропускається якщо не в вікні або останній пост був недавно)...")
     post_to_threads()
 
