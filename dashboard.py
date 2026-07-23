@@ -672,150 +672,178 @@ async function loadAnalytics() {
   if (analyticsLoaded) return;
   analyticsLoaded = true;
   const el = document.getElementById('analytics');
-  el.innerHTML = loader();
 
-  const [postsRes, insRes] = await Promise.all([
-    fetch(withToken('/api/posts')),
-    fetch(withToken('/api/insights'))
-  ]);
-  const postsData = await postsRes.json();
-  const ins = await insRes.json();
-
-  const all = [
-    ...postsData.threads.map(p => ({...p, source:'threads'})),
-    ...postsData.telegram.map(p => ({...p, source:'telegram'}))
-  ].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
-
-  const withMetrics = all.filter(p => p.metrics && p.source === 'threads');
-  const totalViews = withMetrics.reduce((s,p) => s + (p.metrics.views||0), 0);
-  const avgViews = withMetrics.length ? Math.round(totalViews / withMetrics.length) : 0;
-  const topPost = withMetrics.sort((a,b) => engScore(b.metrics) - engScore(a.metrics))[0];
-  const topScore = topPost ? engScore(topPost.metrics) : 0;
-
-  // Stats grid
-  let html = `<div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-label">Всього постів</div>
-      <div class="stat-value">${all.length}</div>
-      <div class="stat-sub">${postsData.threads.length} Threads · ${postsData.telegram.length} TG</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Сер. перегляди</div>
-      <div class="stat-value accent">${avgViews.toLocaleString()}</div>
-      <div class="stat-sub">за пост</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Всього переглядів</div>
-      <div class="stat-value">${totalViews.toLocaleString()}</div>
-      <div class="stat-sub">в Threads</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Топ скор</div>
-      <div class="stat-value accent">${topScore}</div>
-      <div class="stat-sub">найкращий пост</div>
-    </div>
-  </div>`;
-
-  // Chart: Views per post (last 20)
-  const chartPosts = [...withMetrics]
-    .sort((a,b) => (a.timestamp||'').localeCompare(b.timestamp||''))
-    .slice(-20);
-
-  if (chartPosts.length > 1) {
-    html += `<div class="card">
-      <div class="chart-title">Перегляди — останні ${chartPosts.length} постів</div>
-      <div class="chart-wrap"><canvas id="viewsChart"></canvas></div>
-    </div>`;
-  }
-
-  // Insights
-  if (ins.insights) {
-    html += `<div class="card">
-      <div class="section-title" style="font-size:14px;margin-bottom:10px">Аналіз постів</div>
-      <div style="font-size:13px;line-height:1.65;color:#c0c0d8;margin-bottom:10px">${ins.insights}</div>
-      <div class="stat-sub">Оновлено: ${ins.updated_at || '—'} · на основі ${ins.based_on_posts || '?'} постів</div>
-    </div>`;
-  }
-
-  if (ins.winning_patterns && ins.winning_patterns.length) {
-    html += `<div class="card">
-      <div class="insight-label"><div class="dot green"></div>Що працює</div>
-      ${ins.winning_patterns.map(w => `<div class="insight-item">✓ ${w}</div>`).join('')}
-    </div>`;
-  }
-
-  if (ins.avoid_patterns && ins.avoid_patterns.length) {
-    html += `<div class="card">
-      <div class="insight-label"><div class="dot red"></div>Чого уникати</div>
-      ${ins.avoid_patterns.map(a => `<div class="insight-item">✗ ${a}</div>`).join('')}
-    </div>`;
-  }
-
-  if (ins.boost_topics && ins.boost_topics.length) {
-    html += `<div class="card">
-      <div class="insight-label"><div class="dot blue"></div>Розвивати далі</div>
-      ${ins.boost_topics.map(t => `<div class="insight-item">→ ${t}</div>`).join('')}
-    </div>`;
-  }
-
-  // Paused topics/angles
-  const paused = [];
-  (ins.paused_topics||[]).forEach(t => paused.push(`Тема "${t.topic_id}" — пауза до ${t.until}`));
-  (ins.paused_angles||[]).forEach(a => paused.push(`Кут "${a.angle_id}" — пауза до ${a.until}`));
-  if (paused.length) {
-    html += `<div class="card">
-      <div class="insight-label"><div class="dot orange"></div>На паузі (погано заходили)</div>
-      ${paused.map(p => `<div class="paused-item">⏸ ${p}</div>`).join('')}
-    </div>`;
-  }
-
-  // Post improvements
-  if (ins.post_improvements) {
-    html += `<div class="card">
-      <div class="insight-label"><div class="dot blue"></div>Покращення слабких постів</div>
-      ${ins.post_improvements.split('\n').filter(l=>l.trim()).map(l =>
-        `<div class="improvement-card">${l}</div>`
+  // ── Одразу рендеримо скелет щоб не було порожньої сторінки ──
+  el.innerHTML = `
+    <div class="stats-grid" id="stats-grid">
+      ${['Всього постів','Сер. перегляди','Всього переглядів','Топ скор'].map(l =>
+        `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value" style="color:var(--border)">—</div></div>`
       ).join('')}
-    </div>`;
-  }
-
-  if (!ins.insights && !withMetrics.length) {
-    html += empty('📊', 'Аналіз з\'явиться після 12+ постів з метриками');
-  }
-
-  // Analyze post by URL
-  html += `<div class="card">
-    <div class="insight-label"><div class="dot blue"></div>Аналіз поста за посиланням</div>
-    <div class="input-row">
-      <input id="analyze-url" placeholder="https://www.threads.net/@.../post/..." type="url">
-      <button class="btn btn-primary btn-sm" onclick="analyzePost()">Аналіз</button>
     </div>
-    <div id="analyze-result"></div>
-  </div>`;
+    <div id="insights-zone"></div>
+    <div class="card">
+      <div class="insight-label"><div class="dot blue"></div>Аналіз поста за посиланням</div>
+      <div class="input-row">
+        <input id="analyze-url" placeholder="https://www.threads.net/@.../post/..." type="url">
+        <button class="btn btn-primary btn-sm" onclick="analyzePost()">Аналіз</button>
+      </div>
+      <div id="analyze-result"></div>
+    </div>`;
 
-  el.innerHTML = html;
+  try {
+    const [postsRes, insRes] = await Promise.all([
+      fetch(withToken('/api/posts')),
+      fetch(withToken('/api/insights'))
+    ]);
 
-  // Draw chart
-  if (chartPosts.length > 1) {
-    const ctx = document.getElementById('viewsChart').getContext('2d');
-    destroyChart('views');
-    charts['views'] = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: chartPosts.map(p => (p.timestamp||'').slice(0,5)),
-        datasets: [{
-          data: chartPosts.map(p => p.metrics.views || 0),
-          borderColor: '#6366f1',
-          backgroundColor: 'rgba(99,102,241,0.1)',
-          borderWidth: 2.5,
-          pointBackgroundColor: '#6366f1',
-          pointRadius: 4,
-          tension: 0.4,
-          fill: true,
-        }]
-      },
-      options: chartDefaults()
-    });
+    if (!postsRes.ok || !insRes.ok) {
+      const code = !postsRes.ok ? postsRes.status : insRes.status;
+      document.getElementById('insights-zone').innerHTML =
+        `<div class="card" style="border-color:var(--danger)">
+           <div style="color:var(--danger);font-weight:600;margin-bottom:6px">Помилка API (${code})</div>
+           <div style="font-size:13px;color:var(--muted)">
+             ${code === 401 ? 'Не авторизовано — додайте ?token=... до URL' : 'Сервер повернув помилку ' + code}
+           </div>
+         </div>`;
+      return;
+    }
+
+    const postsData = await postsRes.json();
+    const ins = await insRes.json();
+
+    const threads = Array.isArray(postsData.threads) ? postsData.threads : [];
+    const telegram = Array.isArray(postsData.telegram) ? postsData.telegram : [];
+    const all = [
+      ...threads.map(p => ({...p, source:'threads'})),
+      ...telegram.map(p => ({...p, source:'telegram'}))
+    ].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+
+    const withMetrics = all.filter(p => p.metrics && p.source === 'threads');
+    const totalViews = withMetrics.reduce((s,p) => s + (p.metrics.views||0), 0);
+    const avgViews = withMetrics.length ? Math.round(totalViews / withMetrics.length) : 0;
+    const sorted = [...withMetrics].sort((a,b) => engScore(b.metrics) - engScore(a.metrics));
+    const topScore = sorted.length ? engScore(sorted[0].metrics) : 0;
+
+    // Оновлюємо stats grid
+    document.getElementById('stats-grid').innerHTML = `
+      <div class="stat-card">
+        <div class="stat-label">Всього постів</div>
+        <div class="stat-value">${all.length}</div>
+        <div class="stat-sub">${threads.length} Threads · ${telegram.length} TG</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Сер. перегляди</div>
+        <div class="stat-value accent">${avgViews.toLocaleString()}</div>
+        <div class="stat-sub">за пост</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Всього переглядів</div>
+        <div class="stat-value">${totalViews.toLocaleString()}</div>
+        <div class="stat-sub">в Threads</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Топ скор</div>
+        <div class="stat-value accent">${topScore}</div>
+        <div class="stat-sub">найкращий пост</div>
+      </div>`;
+
+    const chartPosts = [...withMetrics]
+      .sort((a,b) => (a.timestamp||'').localeCompare(b.timestamp||''))
+      .slice(-20);
+
+    let iz = '';
+
+    if (chartPosts.length > 1) {
+      iz += `<div class="card">
+        <div class="chart-title">Перегляди — останні ${chartPosts.length} постів</div>
+        <div class="chart-wrap"><canvas id="viewsChart"></canvas></div>
+      </div>`;
+    }
+
+    if (ins.insights) {
+      iz += `<div class="card">
+        <div class="section-title" style="font-size:14px;margin-bottom:10px">Аналіз постів</div>
+        <div style="font-size:13px;line-height:1.65;color:#c0c0d8;margin-bottom:10px">${ins.insights}</div>
+        <div class="stat-sub">Оновлено: ${ins.updated_at||'—'} · на основі ${ins.based_on_posts||'?'} постів</div>
+      </div>`;
+    }
+
+    if (ins.winning_patterns && ins.winning_patterns.length) {
+      iz += `<div class="card">
+        <div class="insight-label"><div class="dot green"></div>Що працює</div>
+        ${ins.winning_patterns.map(w => `<div class="insight-item">✓ ${w}</div>`).join('')}
+      </div>`;
+    }
+
+    if (ins.avoid_patterns && ins.avoid_patterns.length) {
+      iz += `<div class="card">
+        <div class="insight-label"><div class="dot red"></div>Чого уникати</div>
+        ${ins.avoid_patterns.map(a => `<div class="insight-item">✗ ${a}</div>`).join('')}
+      </div>`;
+    }
+
+    if (ins.boost_topics && ins.boost_topics.length) {
+      iz += `<div class="card">
+        <div class="insight-label"><div class="dot blue"></div>Розвивати далі</div>
+        ${ins.boost_topics.map(t => `<div class="insight-item">→ ${t}</div>`).join('')}
+      </div>`;
+    }
+
+    const paused = [];
+    (ins.paused_topics||[]).forEach(t => paused.push(`Тема "${t.topic_id}" — пауза до ${t.until}`));
+    (ins.paused_angles||[]).forEach(a => paused.push(`Кут "${a.angle_id}" — пауза до ${a.until}`));
+    if (paused.length) {
+      iz += `<div class="card">
+        <div class="insight-label"><div class="dot orange"></div>На паузі</div>
+        ${paused.map(p => `<div class="paused-item">⏸ ${p}</div>`).join('')}
+      </div>`;
+    }
+
+    if (ins.post_improvements) {
+      iz += `<div class="card">
+        <div class="insight-label"><div class="dot blue"></div>Покращення слабких постів</div>
+        ${ins.post_improvements.split('\n').filter(l=>l.trim()).map(l =>
+          `<div class="improvement-card">${l}</div>`).join('')}
+      </div>`;
+    }
+
+    if (!ins.insights && !withMetrics.length) {
+      iz += `<div class="empty"><div class="empty-icon">📊</div>
+        Аналіз з'явиться після 12+ постів з метриками (старших 24 год)</div>`;
+    }
+
+    document.getElementById('insights-zone').innerHTML = iz;
+
+    if (chartPosts.length > 1) {
+      const ctx = document.getElementById('viewsChart').getContext('2d');
+      destroyChart('views');
+      charts['views'] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: chartPosts.map(p => (p.timestamp||'').slice(0,5)),
+          datasets: [{
+            data: chartPosts.map(p => p.metrics.views || 0),
+            borderColor: '#6366f1',
+            backgroundColor: 'rgba(99,102,241,0.1)',
+            borderWidth: 2.5,
+            pointBackgroundColor: '#6366f1',
+            pointRadius: 4,
+            tension: 0.4,
+            fill: true,
+          }]
+        },
+        options: chartDefaults()
+      });
+    }
+
+  } catch(err) {
+    document.getElementById('insights-zone').innerHTML =
+      `<div class="card" style="border-color:var(--danger)">
+         <div style="color:var(--danger);font-weight:600;margin-bottom:6px">Помилка завантаження</div>
+         <div style="font-size:13px;color:var(--muted)">${err.message}</div>
+         <button class="btn btn-secondary" style="margin-top:10px;font-size:13px"
+           onclick="analyticsLoaded=false;loadAnalytics()">Спробувати знову</button>
+       </div>`;
   }
 }
 
@@ -858,34 +886,40 @@ async function loadPosts() {
   postsLoaded = true;
   const el = document.getElementById('posts');
   el.innerHTML = loader();
+  try {
+    const res = await fetch(withToken('/api/posts'));
+    if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
+    const data = await res.json();
 
-  const res = await fetch(withToken('/api/posts'));
-  const data = await res.json();
+    const threads = Array.isArray(data.threads) ? data.threads : [];
+    const telegram = Array.isArray(data.telegram) ? data.telegram : [];
+    const all = [
+      ...threads.map(p => ({...p, source:'threads'})),
+      ...telegram.map(p => ({...p, source:'telegram'}))
+    ].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
 
-  const all = [
-    ...data.threads.map(p => ({...p, source:'threads'})),
-    ...data.telegram.map(p => ({...p, source:'telegram'}))
-  ].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+    if (!all.length) {
+      el.innerHTML = empty('📝', 'Постів ще нема');
+      return;
+    }
 
-  if (!all.length) {
-    el.innerHTML = empty('📝', 'Постів ще нема');
-    return;
+    el.innerHTML = all.map(p => {
+      const score = engScore(p.metrics);
+      return `<div class="card">
+        <div class="post-meta">
+          <span class="badge-src ${p.source}">${p.source === 'threads' ? 'Threads' : 'Telegram'}</span>
+          ${p.type ? `<span class="tag">${p.type}</span>` : ''}
+          <span>${p.timestamp || ''}</span>
+          ${p.status ? `<span style="color:${p.status==='published'?'var(--success)':'var(--muted)'}">· ${p.status}</span>` : ''}
+          ${score ? `<span class="score-badge">${score} pt</span>` : ''}
+        </div>
+        <div class="post-text">${(p.text || '').slice(0, 320)}</div>
+        ${metricPills(p.metrics)}
+      </div>`;
+    }).join('');
+  } catch(err) {
+    el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
   }
-
-  el.innerHTML = all.map(p => {
-    const score = engScore(p.metrics);
-    return `<div class="card">
-      <div class="post-meta">
-        <span class="badge-src ${p.source}">${p.source === 'threads' ? 'Threads' : 'Telegram'}</span>
-        ${p.type ? `<span class="tag">${p.type}</span>` : ''}
-        <span>${p.timestamp || ''}</span>
-        ${p.status ? `<span style="color:${p.status==='published'?'var(--success)':'var(--muted)'}">· ${p.status}</span>` : ''}
-        ${score ? `<span class="score-badge">${score} pt</span>` : ''}
-      </div>
-      <div class="post-text">${(p.text || '').slice(0, 320)}</div>
-      ${metricPills(p.metrics)}
-    </div>`;
-  }).join('');
 }
 
 // ═══════════════════════════════════════════════════
@@ -894,8 +928,9 @@ async function loadPosts() {
 async function loadPlan() {
   const el = document.getElementById('plan');
   el.innerHTML = loader();
-
+  try {
   const res = await fetch(withToken('/api/plan'));
+  if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
   const ideas = await res.json();
 
   el.innerHTML = `
@@ -919,6 +954,9 @@ async function loadPlan() {
       </div>
     `).join('') : empty('💡', 'Ідей ще нема — тисни кнопку вище')}
   `;
+  } catch(err) {
+    el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
+  }
 }
 
 async function togglePlan(id, el) {
