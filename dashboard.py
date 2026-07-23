@@ -46,6 +46,10 @@ def check_token():
 
 @app.before_request
 def guard():
+    # Головна сторінка завжди відкривається (токен не потрібен для HTML)
+    if request.path == "/" or not request.path.startswith("/api"):
+        return None
+    # API-маршрути — перевіряємо токен
     if not check_token():
         return jsonify({"error": "unauthorized"}), 401
 
@@ -552,7 +556,23 @@ input:focus, select:focus, textarea:focus { border-color:var(--accent); }
 </div>
 
 <!-- Sections -->
-<div id="analytics" class="section active"></div>
+<div id="analytics" class="section active">
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-card"><div class="stat-label">Всього постів</div><div class="stat-value" style="color:var(--border)">—</div></div>
+    <div class="stat-card"><div class="stat-label">Сер. перегляди</div><div class="stat-value" style="color:var(--border)">—</div></div>
+    <div class="stat-card"><div class="stat-label">Всього переглядів</div><div class="stat-value" style="color:var(--border)">—</div></div>
+    <div class="stat-card"><div class="stat-label">Топ скор</div><div class="stat-value" style="color:var(--border)">—</div></div>
+  </div>
+  <div id="insights-zone"><div class="loader"><div class="spinner"></div>Завантаження...</div></div>
+  <div class="card">
+    <div class="insight-label"><div class="dot blue"></div>Аналіз поста за посиланням</div>
+    <div class="input-row">
+      <input id="analyze-url" placeholder="https://www.threads.net/@.../post/..." type="url">
+      <button class="btn btn-primary btn-sm" onclick="analyzePost()">Аналіз</button>
+    </div>
+    <div id="analyze-result"></div>
+  </div>
+</div>
 <div id="posts" class="section"></div>
 <div id="plan" class="section"></div>
 <div id="videos" class="section"></div>
@@ -671,25 +691,7 @@ let analyticsLoaded = false;
 async function loadAnalytics() {
   if (analyticsLoaded) return;
   analyticsLoaded = true;
-  const el = document.getElementById('analytics');
-
-  // ── Одразу рендеримо скелет щоб не було порожньої сторінки ──
-  el.innerHTML = `
-    <div class="stats-grid" id="stats-grid">
-      ${['Всього постів','Сер. перегляди','Всього переглядів','Топ скор'].map(l =>
-        `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value" style="color:var(--border)">—</div></div>`
-      ).join('')}
-    </div>
-    <div id="insights-zone"></div>
-    <div class="card">
-      <div class="insight-label"><div class="dot blue"></div>Аналіз поста за посиланням</div>
-      <div class="input-row">
-        <input id="analyze-url" placeholder="https://www.threads.net/@.../post/..." type="url">
-        <button class="btn btn-primary btn-sm" onclick="analyzePost()">Аналіз</button>
-      </div>
-      <div id="analyze-result"></div>
-    </div>`;
-
+  // Скелет вже є в HTML — просто завантажуємо дані
   try {
     const [postsRes, insRes] = await Promise.all([
       fetch(withToken('/api/posts')),
