@@ -375,13 +375,21 @@ def resolve_zernio_metrics(zernio_platform, url):
         if not data.get("found"):
             return None
         post = data.get("post", {})
-        a = post.get("analytics", {})
+        post_id = post.get("platformPostId")
+        # sync-external дає лише базове залучення (лайки/коментарі) одразу — перегляди/reach
+        # тягнемо окремим запитом, інакше вони показуються нулями до фонового оновлення
+        a = dict(post.get("analytics", {}) or {})
+        if post_id:
+            full = fetch_zernio_full_analytics(post_id)
+            for key in ("views", "likes", "comments", "shares"):
+                if full.get(key):
+                    a[key] = full[key]
         return {
             "views": a.get("views", 0),
             "likes": a.get("likes", 0),
             "comments": a.get("comments", 0),
             "shares": a.get("shares", 0),
-            "_meta": {"zernio_platform_post_id": post.get("platformPostId")},
+            "_meta": {"zernio_platform_post_id": post_id},
         }
     except Exception as e:
         print(f"Помилка resolve_zernio_metrics ({zernio_platform}): {e}")
@@ -389,6 +397,24 @@ def resolve_zernio_metrics(zernio_platform, url):
 
 
 ZERNIO_VIDEO_PLATFORM = {"instagram": "reels", "tiktok": "tiktok"}
+
+
+def fetch_zernio_full_analytics(platform_post_id):
+    """/v1/posts/sync-external віддає лише 'базове' залучення (лайки/коментарі) одразу —
+    перегляди/reach там навмисно НЕ приходять (у Zernio це окремий, повільніший конвеєр
+    аналітики). Щоб перегляди не висіли нулями до найближчого фонового оновлення (кожні 4 год
+    у main.py), одразу після імпорту питаємо повну аналітику по кожному посту окремо тут же."""
+    try:
+        resp = requests.get(
+            f"{ZERNIO_BASE}/analytics",
+            headers=zernio_headers(),
+            params={"postId": platform_post_id},
+            timeout=15,
+        )
+        return resp.json().get("analytics") or {}
+    except Exception as e:
+        print(f"Помилка fetch_zernio_full_analytics: {e}")
+        return {}
 
 
 def sync_zernio_posts_into_videos(zernio_platform):
@@ -423,7 +449,22 @@ def sync_zernio_posts_into_videos(zernio_platform):
         post_id = post.get("platformPostId")
         if not post_id:
             continue
-        a = post.get("analytics", {}) or {}
+
+        # базове залучення приходить одразу, перегляди/reach — окремим запитом (див. docstring)
+        a = dict(post.get("analytics", {}) or {})
+        full = fetch_zernio_full_analytics(post_id)
+        for key in ("views", "likes", "comments", "shares", "reach"):
+            if full.get(key):
+                a[key] = full[key]
+
+        published_at = post.get("publishedAt")
+        published_str = now_str
+        if published_at:
+            try:
+                published_str = datetime.fromisoformat(published_at.replace("Z", "+00:00")).strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                pass
+
         if post_id in by_zernio_id:
             v = by_zernio_id[post_id]
             v["views"] = a.get("views", v.get("views"))
@@ -442,7 +483,7 @@ def sync_zernio_posts_into_videos(zernio_platform):
                 "shares": a.get("shares", 0),
                 "quotes": None,
                 "note": (post.get("content") or "")[:200],
-                "added_at": now_str,
+                "added_at": published_str,  # дата публікації поста, а не дата підключення акаунту
                 "auto_fetched": True,
                 "zernio_post_id": post_id,
                 "zernio_platform": zernio_platform,
