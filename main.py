@@ -392,7 +392,7 @@ def fetch_post_metrics(post_id):
         "metric": "views,likes,replies,reposts,quotes",
         "access_token": THREADS_ACCESS_TOKEN
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=15)
     data = response.json()
 
     metrics = {}
@@ -915,7 +915,7 @@ def publish_to_telegram(text, photo_file_id=None):
             "photo": photo_file_id,
             "caption": text if fits_caption else ""
         }
-        response = requests.post(url, params=params)
+        response = requests.post(url, params=params, timeout=15)
         data = response.json()
         if not data.get("ok"):
             raise Exception(f"Помилка публікації в Telegram: {data}")
@@ -923,7 +923,7 @@ def publish_to_telegram(text, photo_file_id=None):
 
         if not fits_caption:
             extra_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(extra_url, params={"chat_id": TELEGRAM_CHANNEL_ID, "text": text})
+            requests.post(extra_url, params={"chat_id": TELEGRAM_CHANNEL_ID, "text": text}, timeout=15)
 
         return message_id
 
@@ -932,7 +932,7 @@ def publish_to_telegram(text, photo_file_id=None):
         "chat_id": TELEGRAM_CHANNEL_ID,
         "text": text
     }
-    response = requests.post(url, params=params)
+    response = requests.post(url, params=params, timeout=15)
     data = response.json()
     if not data.get("ok"):
         raise Exception(f"Помилка публікації в Telegram: {data}")
@@ -1005,7 +1005,7 @@ def create_threads_container(text):
         "text": text,
         "access_token": THREADS_ACCESS_TOKEN
     }
-    response = requests.post(url, params=params)
+    response = requests.post(url, params=params, timeout=20)
     data = response.json()
     if "id" not in data:
         raise Exception(f"Помилка створення: {data}")
@@ -1018,7 +1018,7 @@ def publish_threads_post(creation_id):
         "creation_id": creation_id,
         "access_token": THREADS_ACCESS_TOKEN
     }
-    response = requests.post(url, params=params)
+    response = requests.post(url, params=params, timeout=20)
     data = response.json()
     if "id" not in data:
         raise Exception(f"Помилка публікації: {data}")
@@ -1310,7 +1310,7 @@ def send_telegram_dm(text, reply_markup=None):
         payload["reply_markup"] = json.dumps(reply_markup)
 
     try:
-        response = requests.post(url, data=payload)
+        response = requests.post(url, data=payload, timeout=15)
         data = response.json()
         if not data.get("ok"):
             print(f"Помилка Telegram DM: {data}")
@@ -1333,7 +1333,7 @@ def answer_callback_query(callback_id, text=None):
     if text:
         params["text"] = text
     try:
-        requests.post(url, params=params)
+        requests.post(url, params=params, timeout=10)
     except Exception:
         pass
 
@@ -1344,7 +1344,7 @@ def register_bot_commands():
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
     try:
-        requests.post(url, json={"commands": BOT_COMMANDS})
+        requests.post(url, json={"commands": BOT_COMMANDS}, timeout=10)
     except Exception as e:
         print(f"Не вдалось зареєструвати команди бота: {e}")
 
@@ -1365,7 +1365,7 @@ def google_search(query, num=10):
         "q": query,
         "num": num
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=15)
     data = response.json()
     return data.get("items", [])
 
