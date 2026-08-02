@@ -59,6 +59,7 @@ TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hoda
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # опціонально — авто-оновлення статистики YouTube Shorts
 
 SEEN_LEADS_FILE = "seen_leads"
 SEEN_SELFPROMO_FILE = "seen_selfpromo"
@@ -1134,6 +1135,71 @@ def daily_maintenance():
         alert_error("daily_maintenance (метрики/аналіз)", e)
 
 
+def resolve_youtube_metrics(video_id):
+    """YouTube Data API v3 — статистика публічного відео просто за ключем, без OAuth.
+    На відміну від TikTok чи Instagram Reels, де офіційного простого способу нема,
+    тому ці дві платформи лишаються тільки з ручним оновленням цифр."""
+    if not YOUTUBE_API_KEY or not video_id:
+        return None
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "statistics", "id": video_id, "key": YOUTUBE_API_KEY},
+            timeout=15
+        )
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            return None
+        stats = items[0].get("statistics", {})
+        return {
+            "views": int(stats.get("viewCount", 0)),
+            "likes": int(stats.get("likeCount", 0)),
+            "comments": int(stats.get("commentCount", 0)),
+        }
+    except Exception as e:
+        print(f"Помилка resolve_youtube_metrics: {e}")
+        return None
+
+
+def update_video_stats():
+    """Періодично оновлює цифри для відео доданих на сайті — тільки для Threads і YouTube,
+    бо для них є спосіб отримати статистику без ручного вводу (media_id / video_id збережені
+    при додаванні відео на сайті). TikTok і Instagram Reels лишаються ручними — нема офіційного
+    способу дістати їхню статистику без повного OAuth-підключення акаунту як власника контенту."""
+    videos = load_json(VIDEO_STATS_FILE, [])
+    updated = False
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    for v in videos:
+        try:
+            if v.get("platform") == "threads" and v.get("threads_media_id"):
+                metrics = fetch_post_metrics(v["threads_media_id"])
+                if metrics:
+                    v["views"] = metrics.get("views", v.get("views"))
+                    v["likes"] = metrics.get("likes", v.get("likes"))
+                    v["comments"] = metrics.get("replies", v.get("comments"))
+                    v["shares"] = metrics.get("reposts", v.get("shares"))
+                    v["quotes"] = metrics.get("quotes", v.get("quotes"))
+                    v["last_refreshed"] = now_str
+                    updated = True
+
+            elif v.get("platform") == "youtube" and v.get("youtube_video_id"):
+                metrics = resolve_youtube_metrics(v["youtube_video_id"])
+                if metrics:
+                    v["views"] = metrics.get("views", v.get("views"))
+                    v["likes"] = metrics.get("likes", v.get("likes"))
+                    v["comments"] = metrics.get("comments", v.get("comments"))
+                    v["last_refreshed"] = now_str
+                    updated = True
+        except Exception as e:
+            print(f"Помилка оновлення відео {v.get('url')}: {e}")
+
+    if updated:
+        save_json(VIDEO_STATS_FILE, videos)
+        print("Статистика відео (Threads/YouTube) оновлена")
+
+
 def answer_bot_question(question):
     """Відповідає на довільне питання власника (напр. 'куди рухатись з відео'),
     спираючись на реальні дані акаунту: топ/слабкі пости, статистику відео, попередній аналіз.
@@ -1613,6 +1679,7 @@ def poll_telegram_updates():
 # ===== РОЗКЛАД =====
 schedule.every(30).minutes.do(post_to_threads)         # перевірка вікна публікацій (див. POSTING_WINDOWS)
 schedule.every(4).hours.do(daily_maintenance)          # аналіз кожні 4 години
+schedule.every(4).hours.do(update_video_stats)         # авто-оновлення відео (Threads/YouTube)
 schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
 schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка натискань кнопок

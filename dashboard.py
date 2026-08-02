@@ -26,6 +26,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # опціонально — тільки для авто-статистики YouTube Shorts
 
 LOG_FILE = "posts_log"
 TELEGRAM_LOG_FILE = "telegram_log"
@@ -245,6 +246,49 @@ def resolve_threads_metrics(url):
         return None
 
 
+def extract_youtube_id(url):
+    """Дістає ID відео з youtube.com/watch?v=, youtu.be/ або youtube.com/shorts/ посилань."""
+    patterns = [
+        r"(?:youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/)([\w-]{11})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def resolve_youtube_metrics(url):
+    """YouTube Data API v3 віддає перегляди/лайки/коментарі для БУДЬ-ЯКОГО публічного відео
+    просто за API-ключем, без OAuth — на відміну від TikTok чи Instagram Reels де такого
+    простого способу нема. Працює тільки якщо задано YOUTUBE_API_KEY."""
+    if not YOUTUBE_API_KEY:
+        return None
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        return None
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "statistics", "id": video_id, "key": YOUTUBE_API_KEY},
+            timeout=15
+        )
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            return None
+        stats = items[0].get("statistics", {})
+        return {
+            "views": int(stats.get("viewCount", 0)),
+            "likes": int(stats.get("likeCount", 0)),
+            "comments": int(stats.get("commentCount", 0)),
+            "_meta": {"youtube_video_id": video_id}
+        }
+    except Exception as e:
+        print(f"Помилка resolve_youtube_metrics: {e}")
+        return None
+
+
 @app.route("/api/analyze_post", methods=["POST"])
 def api_analyze_post():
     body = request.json or {}
@@ -294,6 +338,22 @@ def api_videos_add():
             entry["shares"] = metrics.get("reposts", entry["shares"])
             entry["quotes"] = metrics.get("quotes", entry["quotes"])
             entry["auto_fetched"] = True
+            # зберігаємо media_id щоб періодичне оновлення в main.py могло питати напряму,
+            # без повторного пошуку серед усіх постів акаунту щоразу
+            media_id = (metrics.get("_meta") or {}).get("media_id")
+            if media_id:
+                entry["threads_media_id"] = media_id
+
+    elif platform == "youtube":
+        metrics = resolve_youtube_metrics(url)
+        if metrics:
+            entry["views"] = metrics.get("views", entry["views"])
+            entry["likes"] = metrics.get("likes", entry["likes"])
+            entry["comments"] = metrics.get("comments", entry["comments"])
+            entry["auto_fetched"] = True
+            video_id = (metrics.get("_meta") or {}).get("youtube_video_id")
+            if video_id:
+                entry["youtube_video_id"] = video_id
 
     videos = load_json(VIDEO_STATS_FILE, [])
     videos.append(entry)
@@ -1074,7 +1134,10 @@ async function loadVideos() {
         <div class="post-meta">
           <span class="tag">${v.platform}</span>
           <span>${v.added_at}</span>
-          ${v.auto_fetched ? '<span style="color:var(--success)">· авто</span>' : ''}
+          ${(v.threads_media_id || v.youtube_video_id)
+            ? '<span style="color:var(--success)">· оновлюється само</span>'
+            : (v.auto_fetched ? '<span style="color:var(--success)">· авто (одноразово)</span>' : '<span style="color:var(--muted)">· вручну</span>')}
+          ${v.last_refreshed ? `<span style="color:var(--muted)">· ${v.last_refreshed}</span>` : ''}
         </div>
         <a class="video-card-url" href="${v.url}" target="_blank">${v.url}</a>
         ${metricPills({views:v.views, likes:v.likes, replies:v.comments, reposts:v.shares, quotes:v.quotes})}
