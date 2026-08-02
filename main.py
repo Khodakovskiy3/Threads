@@ -421,33 +421,54 @@ def notify_post_metrics(post, metrics):
     send_telegram_dm(message)
 
 
+RECENT_METRICS_REFRESH_DAYS = 7  # перегляди/лайки продовжують рости й після публікації —
+                                   # поки пост "свіжий" (молодший за це), метрики оновлюються
+                                   # щоцикл; далі вважаємо що ріст практично зупинився і більше
+                                   # не смикаємо API даремно (раніше метрики писались ОДИН раз
+                                   # назавжди — саме тому цифри застрягали і не доганяли реальні)
+
+
 def update_metrics():
-    """Підтягує метрики для постів старших 3 годин (Threads API не одразу віддає реальні перегляди),
-    і одразу шле власнику інформаційне повідомлення по кожному такому посту (одноразово)."""
+    """Підтягує метрики для постів старших 3 годин (Threads API не одразу віддає реальні перегляди).
+    Для постів молодших RECENT_METRICS_REFRESH_DAYS — оновлює цифри щоразу (перегляди ростуть з часом),
+    для старших — більше не чіпає. Інформаційне повідомлення власнику йде лише один раз, при першому
+    отриманні метрик для поста, а не при кожному повторному оновленні."""
     posts = load_log()
     updated = False
 
     for post in posts:
         if post.get("status") != "published":
             continue
-        if post.get("metrics"):
+
+        post_id = post.get("post_id")
+        if not post_id:
             continue
 
         try:
             post_time = datetime.strptime(post["timestamp"], "%d.%m.%Y %H:%M")
-        except:
+        except Exception:
             continue
 
-        if datetime.now() - post_time < timedelta(hours=3):
+        age = datetime.now() - post_time
+        if age < timedelta(hours=3):
             continue
+
+        has_metrics = bool(post.get("metrics"))
+        is_recent = age < timedelta(days=RECENT_METRICS_REFRESH_DAYS)
+
+        if has_metrics and not is_recent:
+            continue  # "дозрів" — перегляди більше істотно не ростуть, лишаємо як є
 
         try:
-            metrics = fetch_post_metrics(post["post_id"])
+            metrics = fetch_post_metrics(post_id)
             if metrics:
+                is_first_time = not has_metrics
                 post["metrics"] = metrics
+                post["metrics_updated_at"] = datetime.now().strftime("%d.%m.%Y %H:%M")
                 updated = True
-                print(f"Метрики оновлено для поста {post['post_id']}: {metrics}")
-                notify_post_metrics(post, metrics)
+                print(f"Метрики оновлено для поста {post_id}: {metrics}")
+                if is_first_time:
+                    notify_post_metrics(post, metrics)
         except Exception as e:
             print(f"Помилка метрик: {e}")
 
