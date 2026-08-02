@@ -1036,46 +1036,95 @@ async function analyzePost() {
 // ═══════════════════════════════════════════════════
 // ── POSTS SECTION ──
 // ═══════════════════════════════════════════════════
-let postsLoaded = false;
+let postsCache = null;
+
 async function loadPosts() {
-  if (postsLoaded) return;
-  postsLoaded = true;
   const el = document.getElementById('posts');
-  el.innerHTML = loader();
-  try {
-    const res = await fetch(withToken('/api/posts'));
-    if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
-    const data = await res.json();
-
-    const threads = Array.isArray(data.threads) ? data.threads : [];
-    const telegram = Array.isArray(data.telegram) ? data.telegram : [];
-    const all = [
-      ...threads.map(p => ({...p, source:'threads'})),
-      ...telegram.map(p => ({...p, source:'telegram'}))
-    ].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
-
-    if (!all.length) {
-      el.innerHTML = empty('📝', 'Постів ще нема');
+  if (!postsCache) {
+    el.innerHTML = loader();
+    try {
+      const res = await fetch(withToken('/api/posts'));
+      if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
+      const data = await res.json();
+      const threads = Array.isArray(data.threads) ? data.threads : [];
+      const telegram = Array.isArray(data.telegram) ? data.telegram : [];
+      postsCache = [
+        ...threads.map(p => ({...p, platform: 'threads'})),
+        ...telegram.map(p => ({...p, platform: 'telegram'}))
+      ];
+    } catch (err) {
+      el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
       return;
     }
-
-    el.innerHTML = all.map(p => {
-      const score = engScore(p.metrics);
-      return `<div class="card">
-        <div class="post-meta">
-          <span class="badge-src ${p.source}">${p.source === 'threads' ? 'Threads' : 'Telegram'}</span>
-          ${p.type ? `<span class="tag">${p.type}</span>` : ''}
-          <span>${p.timestamp || ''}</span>
-          ${p.status ? `<span style="color:${p.status==='published'?'var(--success)':'var(--muted)'}">· ${p.status}</span>` : ''}
-          ${score ? `<span class="score-badge">${score} pt</span>` : ''}
-        </div>
-        <div class="post-text">${(p.text || '').slice(0, 320)}</div>
-        ${metricPills(p.metrics)}
-      </div>`;
-    }).join('');
-  } catch(err) {
-    el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
   }
+  renderPosts();
+}
+
+function postsControlsBar(sortBy, filterBy) {
+  const sOpt = (v, l) => `<option value="${v}" ${sortBy === v ? 'selected' : ''}>${l}</option>`;
+  const fOpt = (v, l) => `<option value="${v}" ${filterBy === v ? 'selected' : ''}>${l}</option>`;
+  return `<div class="card" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+    <select id="posts-sort" onchange="renderPosts()" style="margin:0;flex:1;min-width:150px">
+      ${sOpt('timestamp', 'Спочатку нові')}
+      ${sOpt('score', 'Топ за скором')}
+      ${sOpt('views', 'Топ за переглядами')}
+      ${sOpt('likes', 'Топ за лайками')}
+      ${sOpt('replies', 'Топ за відповідями')}
+      ${sOpt('reposts', 'Топ за репостами')}
+    </select>
+    <select id="posts-filter" onchange="renderPosts()" style="margin:0;flex:1;min-width:150px">
+      ${fOpt('all', 'Всі пости')}
+      ${fOpt('bot', 'Тільки бот')}
+      ${fOpt('manual', 'Тільки особисті')}
+    </select>
+  </div>`;
+}
+
+function renderPosts() {
+  const el = document.getElementById('posts');
+  const sortEl = document.getElementById('posts-sort');
+  const filterEl = document.getElementById('posts-filter');
+  const sortBy = sortEl ? sortEl.value : 'timestamp';
+  const filterBy = filterEl ? filterEl.value : 'all';
+
+  if (!postsCache || !postsCache.length) {
+    el.innerHTML = postsControlsBar(sortBy, filterBy) + empty('📝', 'Постів ще нема');
+    return;
+  }
+
+  let list = postsCache.slice();
+  if (filterBy === 'bot') list = list.filter(p => p.type !== 'manual');
+  if (filterBy === 'manual') list = list.filter(p => p.type === 'manual');
+
+  const sorters = {
+    timestamp: (a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''),
+    score: (a, b) => engScore(b.metrics) - engScore(a.metrics),
+    views: (a, b) => (b.metrics?.views || 0) - (a.metrics?.views || 0),
+    likes: (a, b) => (b.metrics?.likes || 0) - (a.metrics?.likes || 0),
+    replies: (a, b) => (b.metrics?.replies || 0) - (a.metrics?.replies || 0),
+    reposts: (a, b) => (b.metrics?.reposts || 0) - (a.metrics?.reposts || 0),
+  };
+  list.sort(sorters[sortBy] || sorters.timestamp);
+
+  const rows = !list.length
+    ? empty('📝', 'Нічого не знайдено для цього фільтра')
+    : list.map(p => {
+        const score = engScore(p.metrics);
+        const isManual = p.type === 'manual';
+        return `<div class="card" style="${isManual ? 'opacity:0.65;border-left:3px solid var(--warning)' : ''}">
+          <div class="post-meta">
+            <span class="badge-src ${p.platform}">${p.platform === 'threads' ? 'Threads' : 'Telegram'}</span>
+            ${p.type ? `<span class="tag" style="${isManual ? 'background:rgba(245,158,11,0.15);color:var(--warning)' : ''}">${isManual ? 'особисте' : p.type}</span>` : ''}
+            <span>${p.timestamp || ''}</span>
+            ${p.status ? `<span style="color:${p.status === 'published' ? 'var(--success)' : 'var(--muted)'}">· ${p.status}</span>` : ''}
+            ${score ? `<span class="score-badge">${score} pt</span>` : ''}
+          </div>
+          <div class="post-text">${(p.text || '').slice(0, 320)}</div>
+          ${metricPills(p.metrics)}
+        </div>`;
+      }).join('');
+
+  el.innerHTML = postsControlsBar(sortBy, filterBy) + rows;
 }
 
 // ═══════════════════════════════════════════════════
