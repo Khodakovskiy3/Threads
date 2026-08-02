@@ -1153,20 +1153,25 @@ async function loadVideos() {
   el.innerHTML = `
     <div class="card" style="margin-bottom:16px">
       <div class="insight-label" style="margin-bottom:12px"><div class="dot blue"></div>Додати відео</div>
-      <select id="v-platform">
+      <select id="v-platform" onchange="toggleVideoFields()">
         <option value="threads">Threads</option>
         <option value="tiktok">TikTok</option>
         <option value="reels">Instagram Reels</option>
         <option value="youtube">YouTube Shorts</option>
       </select>
       <input id="v-url" placeholder="Посилання на відео" type="url">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-        <input id="v-views" placeholder="Перегляди" type="number" style="margin:0">
-        <input id="v-likes" placeholder="Лайки" type="number" style="margin:0">
+      <div id="v-auto-note" class="stat-sub" style="padding:0 2px 10px">
+        Достатньо вставити посилання — перегляди, лайки і коментарі підтягнуться самі.
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-        <input id="v-comments" placeholder="Коментарі" type="number" style="margin:0">
-        <input id="v-shares" placeholder="Репости" type="number" style="margin:0">
+      <div id="v-manual-fields" style="display:none">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <input id="v-views" placeholder="Перегляди" type="number" style="margin:0">
+          <input id="v-likes" placeholder="Лайки" type="number" style="margin:0">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <input id="v-comments" placeholder="Коментарі" type="number" style="margin:0">
+          <input id="v-shares" placeholder="Репости" type="number" style="margin:0">
+        </div>
       </div>
       <button class="btn btn-primary" onclick="addVideo(this)">Додати відео</button>
     </div>
@@ -1190,6 +1195,14 @@ async function loadVideos() {
       </div>
     `).join('') : empty('🎬', 'Відео ще не додано')}
   `;
+  toggleVideoFields();
+}
+
+function toggleVideoFields() {
+  const platform = document.getElementById('v-platform').value;
+  const autoFetchable = platform === 'threads' || platform === 'youtube';
+  document.getElementById('v-auto-note').style.display = autoFetchable ? 'block' : 'none';
+  document.getElementById('v-manual-fields').style.display = autoFetchable ? 'none' : 'block';
 }
 
 async function deleteVideo(id) {
