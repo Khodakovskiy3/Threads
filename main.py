@@ -61,10 +61,11 @@ GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # опціонально — авто-оновлення статистики YouTube Shorts
 
-# Instagram/TikTok підключаються через OAuth на сайті (dashboard.py, /auth/instagram/start,
-# /auth/tiktok/start) — токени лежать в тій самій таблиці SOCIAL_TOKENS_FILE, тут їх тільки читаємо
-# щоб періодично оновлювати вже додані відео (так само як для Threads і YouTube).
-SOCIAL_TOKENS_FILE = "social_tokens"
+# Instagram/TikTok підключаються через Zernio (zernio.com, /auth/instagram/start, /auth/tiktok/start
+# в dashboard.py) — готовий сервіс-агрегатор соцмереж замість власної реєстрації застосунків
+# у Meta/TikTok. Тут той самий ключ тільки для періодичного оновлення вже доданих відео.
+ZERNIO_API_KEY = os.getenv("ZERNIO_API_KEY")
+ZERNIO_BASE = "https://zernio.com/api/v1"
 
 SEEN_LEADS_FILE = "seen_leads"
 SEEN_SELFPROMO_FILE = "seen_selfpromo"
@@ -1271,61 +1272,31 @@ def resolve_youtube_metrics(video_id):
         return None
 
 
-def resolve_instagram_metrics_by_id(media_id):
-    """Instagram Graph API insights по вже відомому media_id (збережений при першому
-    підключенні відео через OAuth-акаунт на сайті — тут повторний пошук по URL не потрібен)."""
-    tokens = load_json(SOCIAL_TOKENS_FILE, {})
-    ig = tokens.get("instagram")
-    if not ig or not ig.get("access_token") or not media_id:
+def resolve_zernio_metrics_by_id(platform_post_id):
+    """Zernio analytics по вже відомому platformPostId (збережений при першому підключенні
+    відео на сайті) — /v1/analytics приймає як власні Zernio ID, так і "зовнішні" ID платформи,
+    тому повторний пошук по URL більше не потрібен."""
+    if not ZERNIO_API_KEY or not platform_post_id:
         return None
     try:
         resp = requests.get(
-            f"https://graph.facebook.com/v19.0/{media_id}/insights",
-            params={"metric": "plays,likes,comments,shares,saved,reach", "access_token": ig["access_token"]},
+            f"{ZERNIO_BASE}/analytics",
+            headers={"Authorization": f"Bearer {ZERNIO_API_KEY}"},
+            params={"postId": platform_post_id},
             timeout=15,
         )
         data = resp.json()
-        metrics = {}
-        for item_data in data.get("data", []):
-            val = item_data.get("values", [{}])[0].get("value", 0)
-            metrics[item_data["name"]] = val
-        return {
-            "views": metrics.get("plays", metrics.get("reach", 0)),
-            "likes": metrics.get("likes", 0),
-            "comments": metrics.get("comments", 0),
-            "shares": metrics.get("shares", 0),
-        }
-    except Exception as e:
-        print(f"Помилка resolve_instagram_metrics_by_id: {e}")
-        return None
-
-
-def resolve_tiktok_metrics_by_id(video_id):
-    """TikTok video.query по вже відомому video_id (без повторного пошуку по посиланню)."""
-    tokens = load_json(SOCIAL_TOKENS_FILE, {})
-    tt = tokens.get("tiktok")
-    if not tt or not tt.get("access_token") or not video_id:
-        return None
-    try:
-        resp = requests.post(
-            "https://open.tiktokapis.com/v2/video/query/",
-            headers={"Authorization": f"Bearer {tt['access_token']}", "Content-Type": "application/json"},
-            params={"fields": "id,view_count,like_count,comment_count,share_count"},
-            json={"filters": {"video_ids": [video_id]}},
-            timeout=15,
-        )
-        videos = resp.json().get("data", {}).get("videos", [])
-        if not videos:
+        a = data.get("analytics") or {}
+        if not a:
             return None
-        v = videos[0]
         return {
-            "views": v.get("view_count", 0),
-            "likes": v.get("like_count", 0),
-            "comments": v.get("comment_count", 0),
-            "shares": v.get("share_count", 0),
+            "views": a.get("views", 0),
+            "likes": a.get("likes", 0),
+            "comments": a.get("comments", 0),
+            "shares": a.get("shares", 0),
         }
     except Exception as e:
-        print(f"Помилка resolve_tiktok_metrics_by_id: {e}")
+        print(f"Помилка resolve_zernio_metrics_by_id: {e}")
         return None
 
 
@@ -1360,18 +1331,8 @@ def update_video_stats():
                     v["last_refreshed"] = now_str
                     updated = True
 
-            elif v.get("platform") == "reels" and v.get("ig_media_id"):
-                metrics = resolve_instagram_metrics_by_id(v["ig_media_id"])
-                if metrics:
-                    v["views"] = metrics.get("views", v.get("views"))
-                    v["likes"] = metrics.get("likes", v.get("likes"))
-                    v["comments"] = metrics.get("comments", v.get("comments"))
-                    v["shares"] = metrics.get("shares", v.get("shares"))
-                    v["last_refreshed"] = now_str
-                    updated = True
-
-            elif v.get("platform") == "tiktok" and v.get("tiktok_video_id"):
-                metrics = resolve_tiktok_metrics_by_id(v["tiktok_video_id"])
+            elif v.get("platform") in ("reels", "tiktok") and v.get("zernio_post_id"):
+                metrics = resolve_zernio_metrics_by_id(v["zernio_post_id"])
                 if metrics:
                     v["views"] = metrics.get("views", v.get("views"))
                     v["likes"] = metrics.get("likes", v.get("likes"))

@@ -28,16 +28,15 @@ THREADS_USER_ID = os.getenv("THREADS_USER_ID")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # опціонально — тільки для авто-статистики YouTube Shorts
 
-# OAuth для Instagram (Reels) і TikTok — щоб замість ручного вводу цифр чи ризикованого
-# скрапінгу користувач просто натиснув "Підключити акаунт" і авторизувався, як зараз з Threads.
+# Instagram (Reels) і TikTok підключаються через Zernio (zernio.com) — готовий сервіс-агрегатор
+# соцмереж, який уже сам зареєстрований і пройшов перевірки в Meta/TikTok. Замість власного
+# App ID/Secret і App Review нам потрібен лише один API-ключ. Безкоштовно для перших 2 акаунтів.
 # PUBLIC_BASE_URL — адреса цього дашборду в проді (наприклад https://hodakov-digital.up.railway.app),
-# потрібна щоб зібрати правильний redirect_uri для OAuth-провайдерів.
+# потрібна щоб зібрати правильний redirect_url для Zernio.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-INSTAGRAM_APP_ID = os.getenv("INSTAGRAM_APP_ID")
-INSTAGRAM_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET")
-TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
-TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET")
-SOCIAL_TOKENS_FILE = "social_tokens"
+ZERNIO_API_KEY = os.getenv("ZERNIO_API_KEY")
+ZERNIO_BASE = "https://zernio.com/api/v1"
+ZERNIO_STATE_FILE = "zernio_state"
 
 LOG_FILE = "posts_log"
 TELEGRAM_LOG_FILE = "telegram_log"
@@ -300,255 +299,152 @@ def resolve_youtube_metrics(url):
         return None
 
 
-def resolve_instagram_metrics(url):
-    """Instagram Graph API: шукає медіа за посиланням серед останніх постів підключеного
-    Business/Creator акаунту і повертає insights (перегляди Reels, лайки, коментарі, репости).
-    Працює лише якщо акаунт підключено через /auth/instagram/start (без цього — None)."""
-    tokens = load_json(SOCIAL_TOKENS_FILE, {})
-    ig = tokens.get("instagram")
-    if not ig or not ig.get("access_token") or not ig.get("ig_user_id"):
-        return None
-    try:
-        url_normalized = url.strip().rstrip("/").split("?")[0]
-        media_id = None
-        after_cursor = None
-
-        for _page in range(5):
-            params = {
-                "fields": "id,permalink,media_product_type",
-                "access_token": ig["access_token"],
-                "limit": 50,
-            }
-            if after_cursor:
-                params["after"] = after_cursor
-            resp = requests.get(
-                f"https://graph.facebook.com/v19.0/{ig['ig_user_id']}/media",
-                params=params, timeout=15
-            )
-            data = resp.json()
-            for item in data.get("data", []):
-                item_url = (item.get("permalink") or "").rstrip("/").split("?")[0]
-                if item_url == url_normalized:
-                    media_id = item["id"]
-                    break
-            if media_id:
-                break
-            after_cursor = data.get("paging", {}).get("cursors", {}).get("after")
-            if not after_cursor:
-                break
-
-        if not media_id:
-            return None
-
-        insights_resp = requests.get(
-            f"https://graph.facebook.com/v19.0/{media_id}/insights",
-            params={"metric": "plays,likes,comments,shares,saved,reach", "access_token": ig["access_token"]},
-            timeout=15,
-        )
-        insights_data = insights_resp.json()
-        metrics = {}
-        for item_data in insights_data.get("data", []):
-            val = item_data.get("values", [{}])[0].get("value", 0)
-            metrics[item_data["name"]] = val
-
-        return {
-            "views": metrics.get("plays", metrics.get("reach", 0)),
-            "likes": metrics.get("likes", 0),
-            "comments": metrics.get("comments", 0),
-            "shares": metrics.get("shares", 0),
-            "_meta": {"ig_media_id": media_id},
-        }
-    except Exception as e:
-        print(f"Помилка resolve_instagram_metrics: {e}")
-        return None
+# ===== Zernio: підключення Instagram / TikTok без власної реєстрації застосунку =====
+# Замість того щоб самим реєструвати App у Meta for Developers і TikTok for Developers
+# (App Review, App ID/Secret, redirect URI вручну) — використовуємо готовий сервіс-агрегатор
+# Zernio, який уже пройшов усі ці перевірки. Власник тисне "Підключити", логіниться прямо на
+# сторінці Instagram/TikTok, і Zernio сам зберігає з'єднання — нам лишається тільки один API-ключ.
+# Безкоштовно для перших 2 підключених акаунтів (docs.zernio.com/pricing).
+def zernio_headers():
+    return {"Authorization": f"Bearer {ZERNIO_API_KEY}"}
 
 
-def resolve_tiktok_metrics(url):
-    """TikTok API for Developers (video.list): шукає відео за посиланням серед останніх
-    відео підключеного акаунту. Працює лише якщо акаунт підключено через /auth/tiktok/start."""
-    tokens = load_json(SOCIAL_TOKENS_FILE, {})
-    tt = tokens.get("tiktok")
-    if not tt or not tt.get("access_token"):
-        return None
-    try:
-        url_normalized = url.strip().rstrip("/").split("?")[0]
-        cursor = 0
-        matched = None
-
-        for _page in range(5):
-            resp = requests.post(
-                "https://open.tiktokapis.com/v2/video/list/",
-                headers={"Authorization": f"Bearer {tt['access_token']}", "Content-Type": "application/json"},
-                params={"fields": "id,share_url,view_count,like_count,comment_count,share_count"},
-                json={"max_count": 20, "cursor": cursor},
-                timeout=15,
-            )
-            data = resp.json().get("data", {})
-            for v in data.get("videos", []):
-                v_url = (v.get("share_url") or "").rstrip("/").split("?")[0]
-                if v_url == url_normalized:
-                    matched = v
-                    break
-            if matched or not data.get("has_more"):
-                break
-            cursor = data.get("cursor", 0)
-
-        if not matched:
-            return None
-
-        return {
-            "views": matched.get("view_count", 0),
-            "likes": matched.get("like_count", 0),
-            "comments": matched.get("comment_count", 0),
-            "shares": matched.get("share_count", 0),
-            "_meta": {"tiktok_video_id": matched.get("id")},
-        }
-    except Exception as e:
-        print(f"Помилка resolve_tiktok_metrics: {e}")
-        return None
-
-
-# ===== OAuth: підключення акаунтів Instagram / TikTok =====
-# Замість того щоб просити вставляти цифри вручну або ризикувати скрапінгом — власник тисне
-# "Підключити акаунт" на дашборді, логіниться на самій платформі, і токен зберігається тут же.
-# Той самий підхід що вже працює для Threads.
-@app.route("/api/social_status")
-def api_social_status():
-    tokens = load_json(SOCIAL_TOKENS_FILE, {})
-    return jsonify({
-        "instagram": bool(tokens.get("instagram", {}).get("access_token")),
-        "tiktok": bool(tokens.get("tiktok", {}).get("access_token")),
-    })
-
-
-@app.route("/auth/instagram/start")
-def auth_instagram_start():
-    if not INSTAGRAM_APP_ID or not PUBLIC_BASE_URL:
-        return "Instagram OAuth не налаштовано — потрібні env-змінні INSTAGRAM_APP_ID і PUBLIC_BASE_URL", 500
-    redirect_uri = f"{PUBLIC_BASE_URL}/auth/instagram/callback"
-    state = request.args.get("token", "")
-    scopes = "instagram_basic,instagram_manage_insights,pages_show_list,business_management"
-    auth_url = (
-        "https://www.facebook.com/v19.0/dialog/oauth"
-        f"?client_id={INSTAGRAM_APP_ID}&redirect_uri={requests.utils.quote(redirect_uri, safe='')}"
-        f"&scope={scopes}&response_type=code&state={requests.utils.quote(state, safe='')}"
-    )
-    return redirect(auth_url)
-
-
-@app.route("/auth/instagram/callback")
-def auth_instagram_callback():
-    code = request.args.get("code")
-    error = request.args.get("error")
-    state = request.args.get("state", "")
-    back_url = f"/?token={state}#videos" if state else "/#videos"
-
-    if error or not code:
-        return f"Instagram авторизація не вдалась: {error or 'код не отримано'}", 400
-
-    redirect_uri = f"{PUBLIC_BASE_URL}/auth/instagram/callback"
-    try:
-        token_resp = requests.get(
-            "https://graph.facebook.com/v19.0/oauth/access_token",
-            params={
-                "client_id": INSTAGRAM_APP_ID, "client_secret": INSTAGRAM_APP_SECRET,
-                "redirect_uri": redirect_uri, "code": code,
-            }, timeout=15,
-        )
-        short_token = token_resp.json().get("access_token")
-        if not short_token:
-            return f"Не вдалось отримати токен: {token_resp.text}", 400
-
-        long_resp = requests.get(
-            "https://graph.facebook.com/v19.0/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token", "client_id": INSTAGRAM_APP_ID,
-                "client_secret": INSTAGRAM_APP_SECRET, "fb_exchange_token": short_token,
-            }, timeout=15,
-        )
-        long_token = long_resp.json().get("access_token", short_token)
-
-        pages_resp = requests.get(
-            "https://graph.facebook.com/v19.0/me/accounts",
-            params={"access_token": long_token, "fields": "instagram_business_account,name"},
-            timeout=15,
-        )
-        ig_account_id = None
-        for page in pages_resp.json().get("data", []):
-            ig = page.get("instagram_business_account")
-            if ig:
-                ig_account_id = ig["id"]
-                break
-
-        if not ig_account_id:
-            return ("Facebook-акаунт авторизовано, але жодна сторінка не привʼязана до Instagram "
-                    "Business/Creator акаунту. Привʼяжи Instagram у налаштуваннях Facebook-сторінки "
-                    "(Meta Business Suite → Налаштування → Пов'язані акаунти) і спробуй ще раз."), 400
-
-        tokens = load_json(SOCIAL_TOKENS_FILE, {})
-        tokens["instagram"] = {
-            "access_token": long_token,
-            "ig_user_id": ig_account_id,
-            "connected_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        }
-        save_json(SOCIAL_TOKENS_FILE, tokens)
-        return redirect(back_url)
-    except Exception as e:
-        return f"Помилка Instagram OAuth: {e}", 500
-
-
-@app.route("/auth/tiktok/start")
-def auth_tiktok_start():
-    if not TIKTOK_CLIENT_KEY or not PUBLIC_BASE_URL:
-        return "TikTok OAuth не налаштовано — потрібні env-змінні TIKTOK_CLIENT_KEY і PUBLIC_BASE_URL", 500
-    redirect_uri = f"{PUBLIC_BASE_URL}/auth/tiktok/callback"
-    state = request.args.get("token", "") or str(random.randint(100000, 999999))
-    auth_url = (
-        "https://www.tiktok.com/v2/auth/authorize/"
-        f"?client_key={TIKTOK_CLIENT_KEY}&scope=user.info.basic,video.list"
-        f"&response_type=code&redirect_uri={requests.utils.quote(redirect_uri, safe='')}"
-        f"&state={requests.utils.quote(state, safe='')}"
-    )
-    return redirect(auth_url)
-
-
-@app.route("/auth/tiktok/callback")
-def auth_tiktok_callback():
-    code = request.args.get("code")
-    error = request.args.get("error")
-    state = request.args.get("state", "")
-    back_url = f"/?token={state}#videos" if state else "/#videos"
-
-    if error or not code:
-        return f"TikTok авторизація не вдалась: {error or 'код не отримано'}", 400
-
-    redirect_uri = f"{PUBLIC_BASE_URL}/auth/tiktok/callback"
+def get_or_create_zernio_profile():
+    """Zernio групує підключені акаунти в 'профіль' (типу бренд/проєкт) — створюємо один
+    раз для hodakov.digital і далі перевикористовуємо той самий id з усіх запитів."""
+    state = load_json(ZERNIO_STATE_FILE, {})
+    if state.get("profile_id"):
+        return state["profile_id"]
     try:
         resp = requests.post(
-            "https://open.tiktokapis.com/v2/oauth/token/",
-            data={
-                "client_key": TIKTOK_CLIENT_KEY, "client_secret": TIKTOK_CLIENT_SECRET,
-                "code": code, "grant_type": "authorization_code", "redirect_uri": redirect_uri,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            f"{ZERNIO_BASE}/profiles",
+            headers=zernio_headers(),
+            json={"name": "hodakov.digital", "description": "Threads AutoPoster"},
             timeout=15,
         )
-        data = resp.json()
-        access_token = data.get("access_token")
-        if not access_token:
-            return f"Не вдалось отримати токен TikTok: {resp.text}", 400
-
-        tokens = load_json(SOCIAL_TOKENS_FILE, {})
-        tokens["tiktok"] = {
-            "access_token": access_token,
-            "refresh_token": data.get("refresh_token"),
-            "open_id": data.get("open_id"),
-            "connected_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        }
-        save_json(SOCIAL_TOKENS_FILE, tokens)
-        return redirect(back_url)
+        profile_id = resp.json().get("profile", {}).get("_id")
+        if profile_id:
+            state["profile_id"] = profile_id
+            save_json(ZERNIO_STATE_FILE, state)
+        return profile_id
     except Exception as e:
-        return f"Помилка TikTok OAuth: {e}", 500
+        print(f"Помилка get_or_create_zernio_profile: {e}")
+        return None
+
+
+def list_zernio_accounts():
+    try:
+        resp = requests.get(f"{ZERNIO_BASE}/accounts", headers=zernio_headers(), timeout=15)
+        return resp.json().get("accounts", [])
+    except Exception as e:
+        print(f"Помилка list_zernio_accounts: {e}")
+        return []
+
+
+def get_zernio_account_id(platform):
+    """platform: 'instagram' або 'tiktok' (Zernio-назва платформи, не наша назва відео-типу)."""
+    state = load_json(ZERNIO_STATE_FILE, {})
+    cached = state.get("accounts", {})
+    if cached.get(platform):
+        return cached[platform]
+    for acc in list_zernio_accounts():
+        if acc.get("platform") == platform:
+            cached[platform] = acc["_id"]
+            state["accounts"] = cached
+            save_json(ZERNIO_STATE_FILE, state)
+            return acc["_id"]
+    return None
+
+
+def resolve_zernio_metrics(zernio_platform, url):
+    """Шукає пост/відео за посиланням серед постів підключеного (через Zernio) акаунту —
+    працює для Instagram Reels і TikTok однаково через /v1/posts/sync-external."""
+    if not ZERNIO_API_KEY:
+        return None
+    account_id = get_zernio_account_id(zernio_platform)
+    if not account_id:
+        return None
+    try:
+        resp = requests.post(
+            f"{ZERNIO_BASE}/posts/sync-external",
+            headers=zernio_headers(),
+            json={"accountId": account_id, "url": url},
+            timeout=20,
+        )
+        data = resp.json()
+        if not data.get("found"):
+            return None
+        post = data.get("post", {})
+        a = post.get("analytics", {})
+        return {
+            "views": a.get("views", 0),
+            "likes": a.get("likes", 0),
+            "comments": a.get("comments", 0),
+            "shares": a.get("shares", 0),
+            "_meta": {"zernio_platform_post_id": post.get("platformPostId")},
+        }
+    except Exception as e:
+        print(f"Помилка resolve_zernio_metrics ({zernio_platform}): {e}")
+        return None
+
+
+@app.route("/api/social_status")
+def api_social_status():
+    if not ZERNIO_API_KEY:
+        return jsonify({"instagram": False, "tiktok": False})
+    accounts = list_zernio_accounts()
+    connected = {a.get("platform") for a in accounts}
+    state = load_json(ZERNIO_STATE_FILE, {})
+    cached = state.get("accounts", {})
+    for a in accounts:
+        if a.get("platform") in ("instagram", "tiktok"):
+            cached[a["platform"]] = a["_id"]
+    state["accounts"] = cached
+    save_json(ZERNIO_STATE_FILE, state)
+    return jsonify({"instagram": "instagram" in connected, "tiktok": "tiktok" in connected})
+
+
+@app.route("/auth/<platform>/start")
+def auth_zernio_start(platform):
+    if platform not in ("instagram", "tiktok"):
+        return "Невідома платформа", 404
+    if not ZERNIO_API_KEY:
+        return "Zernio не налаштовано — потрібна env-змінна ZERNIO_API_KEY (zernio.com/signup)", 500
+    if not PUBLIC_BASE_URL:
+        return "Потрібна env-змінна PUBLIC_BASE_URL", 500
+
+    profile_id = get_or_create_zernio_profile()
+    if not profile_id:
+        return "Не вдалось створити профіль Zernio — перевір ZERNIO_API_KEY", 500
+
+    token = request.args.get("token", "")
+    redirect_url = f"{PUBLIC_BASE_URL}/auth/{platform}/callback"
+    if token:
+        redirect_url += f"?token={token}"
+
+    try:
+        resp = requests.get(
+            f"{ZERNIO_BASE}/connect/{platform}",
+            params={"profileId": profile_id, "redirect_url": redirect_url},
+            headers=zernio_headers(),
+            timeout=15,
+        )
+        auth_url = resp.json().get("authUrl")
+        if not auth_url:
+            return f"Не вдалось отримати посилання для підключення: {resp.text}", 500
+        return redirect(auth_url)
+    except Exception as e:
+        return f"Помилка Zernio connect: {e}", 500
+
+
+@app.route("/auth/<platform>/callback")
+def auth_zernio_callback(platform):
+    if platform not in ("instagram", "tiktok"):
+        return "Невідома платформа", 404
+    token = request.args.get("token", "")
+    # Саме підключення вже відбулось на стороні Zernio до цього редіректу — нам лишається
+    # тільки повернути власника на дашборд, /api/social_status підхопить нове з'єднання.
+    return redirect(f"/?token={token}#videos" if token else "/#videos")
 
 
 @app.route("/api/analyze_post", methods=["POST"])
@@ -618,28 +514,30 @@ def api_videos_add():
                 entry["youtube_video_id"] = video_id
 
     elif platform == "reels":
-        metrics = resolve_instagram_metrics(url)
+        metrics = resolve_zernio_metrics("instagram", url)
         if metrics:
             entry["views"] = metrics.get("views", entry["views"])
             entry["likes"] = metrics.get("likes", entry["likes"])
             entry["comments"] = metrics.get("comments", entry["comments"])
             entry["shares"] = metrics.get("shares", entry["shares"])
             entry["auto_fetched"] = True
-            media_id = (metrics.get("_meta") or {}).get("ig_media_id")
-            if media_id:
-                entry["ig_media_id"] = media_id
+            post_id = (metrics.get("_meta") or {}).get("zernio_platform_post_id")
+            if post_id:
+                entry["zernio_post_id"] = post_id
+                entry["zernio_platform"] = "instagram"
 
     elif platform == "tiktok":
-        metrics = resolve_tiktok_metrics(url)
+        metrics = resolve_zernio_metrics("tiktok", url)
         if metrics:
             entry["views"] = metrics.get("views", entry["views"])
             entry["likes"] = metrics.get("likes", entry["likes"])
             entry["comments"] = metrics.get("comments", entry["comments"])
             entry["shares"] = metrics.get("shares", entry["shares"])
             entry["auto_fetched"] = True
-            video_id = (metrics.get("_meta") or {}).get("tiktok_video_id")
-            if video_id:
-                entry["tiktok_video_id"] = video_id
+            post_id = (metrics.get("_meta") or {}).get("zernio_platform_post_id")
+            if post_id:
+                entry["zernio_post_id"] = post_id
+                entry["zernio_platform"] = "tiktok"
 
     videos = load_json(VIDEO_STATS_FILE, [])
     videos.append(entry)
@@ -1600,7 +1498,7 @@ async function loadVideos() {
         <div class="post-meta">
           <span class="tag">${v.platform}</span>
           <span>${v.added_at}</span>
-          ${(v.threads_media_id || v.youtube_video_id || v.ig_media_id || v.tiktok_video_id)
+          ${(v.threads_media_id || v.youtube_video_id || v.zernio_post_id)
             ? '<span style="color:var(--success)">· оновлюється само</span>'
             : (v.auto_fetched ? '<span style="color:var(--success)">· авто (одноразово)</span>' : '<span style="color:var(--muted)">· вручну</span>')}
           ${v.last_refreshed ? `<span style="color:var(--muted)">· ${v.last_refreshed}</span>` : ''}
