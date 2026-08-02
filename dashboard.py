@@ -388,6 +388,83 @@ def resolve_zernio_metrics(zernio_platform, url):
         return None
 
 
+ZERNIO_VIDEO_PLATFORM = {"instagram": "reels", "tiktok": "tiktok"}
+
+
+def sync_zernio_posts_into_videos(zernio_platform):
+    """Підтягує ВСІ пости/відео підключеного (через Zernio) акаунту і додає ті, яких ще нема
+    у таблиці відео на сайті — щоб після підключення Reels/TikTok з'являлись самі, без вставки
+    посилань по одному вручну. Вже наявні (за zernio_post_id) записи просто оновлює цифрами.
+    Викликається одразу після OAuth-підключення і за запитом з кнопки 'Синхронізувати'."""
+    if not ZERNIO_API_KEY:
+        return 0
+    account_id = get_zernio_account_id(zernio_platform)
+    if not account_id:
+        return 0
+    our_platform = ZERNIO_VIDEO_PLATFORM.get(zernio_platform)
+    try:
+        resp = requests.post(
+            f"{ZERNIO_BASE}/posts/sync-external",
+            headers=zernio_headers(),
+            json={"accountId": account_id},
+            timeout=25,
+        )
+        posts = resp.json().get("posts", [])
+    except Exception as e:
+        print(f"Помилка sync_zernio_posts_into_videos ({zernio_platform}): {e}")
+        return 0
+
+    videos = load_json(VIDEO_STATS_FILE, [])
+    by_zernio_id = {v.get("zernio_post_id"): v for v in videos if v.get("zernio_post_id")}
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    added = 0
+
+    for post in posts:
+        post_id = post.get("platformPostId")
+        if not post_id:
+            continue
+        a = post.get("analytics", {}) or {}
+        if post_id in by_zernio_id:
+            v = by_zernio_id[post_id]
+            v["views"] = a.get("views", v.get("views"))
+            v["likes"] = a.get("likes", v.get("likes"))
+            v["comments"] = a.get("comments", v.get("comments"))
+            v["shares"] = a.get("shares", v.get("shares"))
+            v["last_refreshed"] = now_str
+        else:
+            videos.append({
+                "id": f"video-{int(datetime.now().timestamp()*1000)}-{random.randint(1000, 9999)}",
+                "platform": our_platform,
+                "url": post.get("platformPostUrl", ""),
+                "views": a.get("views", 0),
+                "likes": a.get("likes", 0),
+                "comments": a.get("comments", 0),
+                "shares": a.get("shares", 0),
+                "quotes": None,
+                "note": (post.get("content") or "")[:200],
+                "added_at": now_str,
+                "auto_fetched": True,
+                "zernio_post_id": post_id,
+                "zernio_platform": zernio_platform,
+            })
+            added += 1
+
+    if added or by_zernio_id:
+        save_json(VIDEO_STATS_FILE, videos)
+    return added
+
+
+@app.route("/api/videos/sync", methods=["POST"])
+def api_videos_sync():
+    """Ручний тригер синхронізації (кнопка 'Синхронізувати' на дашборді) — підтягує всі
+    Reels/TikTok з підключених акаунтів одразу, не чекаючи фонового оновлення."""
+    added = 0
+    for zp in ("instagram", "tiktok"):
+        if get_zernio_account_id(zp):
+            added += sync_zernio_posts_into_videos(zp)
+    return jsonify({"ok": True, "added": added})
+
+
 @app.route("/api/social_status")
 def api_social_status():
     if not ZERNIO_API_KEY:
@@ -442,8 +519,13 @@ def auth_zernio_callback(platform):
     if platform not in ("instagram", "tiktok"):
         return "Невідома платформа", 404
     token = request.args.get("token", "")
-    # Саме підключення вже відбулось на стороні Zernio до цього редіректу — нам лишається
-    # тільки повернути власника на дашборд, /api/social_status підхопить нове з'єднання.
+    # Саме підключення вже відбулось на стороні Zernio до цього редіректу. Одразу підтягуємо
+    # всі наявні Reels/TikTok цього акаунту, щоб вони з'явились на сайті самі — без вставки
+    # посилань по одному вручну.
+    try:
+        sync_zernio_posts_into_videos(platform)
+    except Exception as e:
+        print(f"Помилка первинної синхронізації після підключення {platform}: {e}")
     return redirect(f"/?token={token}#videos" if token else "/#videos")
 
 
@@ -1446,8 +1528,9 @@ function connectRow(key, label, note) {
   </div>`;
 }
 
-async function loadVideos() {
-  if (videosLoaded) return;
+async function loadVideos(opts) {
+  opts = opts || {};
+  if (videosLoaded && !opts.force) { maybeAutoSync(); return; }
   videosLoaded = true;
   const el = document.getElementById('videos');
   el.innerHTML = loader();
@@ -1462,9 +1545,12 @@ async function loadVideos() {
   el.innerHTML = `
     <div class="card" style="margin-bottom:16px">
       <div class="insight-label" style="margin-bottom:12px"><div class="dot blue"></div>Підключені акаунти</div>
-      ${connectRow('instagram', 'Instagram', 'Перегляди Reels підтягуються самі')}
-      ${connectRow('tiktok', 'TikTok', 'Перегляди відео підтягуються самі')}
-      <div class="stat-sub" style="padding:10px 2px 0">Один раз авторизуєшся — далі просто вставляєш посилання, без ручного вводу цифр.</div>
+      ${connectRow('instagram', 'Instagram', 'Reels підтягуються самі, без вставки посилань')}
+      ${connectRow('tiktok', 'TikTok', 'Відео підтягуються самі, без вставки посилань')}
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px">
+        <div class="stat-sub" style="padding:0 2px">Один раз авторизуєшся — далі всі Reels/TikTok з'являються тут самі.</div>
+        <button class="btn btn-secondary btn-sm" id="sync-videos-btn" onclick="syncConnectedAccounts(this)">Синхронізувати зараз</button>
+      </div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="insight-label" style="margin-bottom:12px"><div class="dot blue"></div>Додати відео</div>
@@ -1524,6 +1610,41 @@ function toggleVideoFields() {
   document.getElementById('v-auto-note').style.display = autoFetchable ? 'block' : 'none';
   document.getElementById('v-connect-note').style.display = needsConnect ? 'block' : 'none';
   document.getElementById('v-manual-fields').style.display = autoFetchable ? 'none' : 'block';
+}
+
+let autoSyncedThisSession = false;
+
+async function maybeAutoSync() {
+  // Тихо (без спінера) підтягує нові Reels/TikTok у фоні, коли повертаєшся на вкладку —
+  // раз на сесію, щоб не смикати Zernio API щоразу при перемиканні вкладок.
+  if (autoSyncedThisSession) return;
+  autoSyncedThisSession = true;
+  try {
+    const r = await fetch(withToken('/api/videos/sync'), { method: 'POST' });
+    const data = await r.json();
+    if (data.added > 0) { videosLoaded = false; await loadVideos({ force: true }); }
+  } catch (e) { console.error('фонова синхронізація не вдалась', e); }
+}
+
+async function syncConnectedAccounts(btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Синхронізую...';
+  try {
+    const r = await fetch(withToken('/api/videos/sync'), { method: 'POST' });
+    const data = await r.json();
+    videosLoaded = false;
+    await loadVideos({ force: true });
+    const freshBtn = document.getElementById('sync-videos-btn');
+    if (freshBtn) {
+      freshBtn.textContent = data.added > 0 ? `Додано ${data.added} нових` : 'Нових немає';
+      setTimeout(() => { const b = document.getElementById('sync-videos-btn'); if (b) b.textContent = original; }, 3000);
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert('Не вдалось синхронізувати: ' + e.message);
+  }
 }
 
 async function deleteVideo(id) {
