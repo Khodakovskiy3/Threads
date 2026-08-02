@@ -545,6 +545,13 @@ body::after {
 }
 .card:active { border-color: var(--accent); }
 
+/* ── Paired cards (side by side on wider screens) ── */
+.pair-grid { display:grid; grid-template-columns:1fr; gap:14px; margin-bottom:14px; }
+.pair-grid .card { margin-bottom:0; }
+@media (min-width:560px) {
+  .pair-grid { grid-template-columns:1fr 1fr; }
+}
+
 /* ── Stats grid ── */
 .stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px; }
 .stat-card {
@@ -956,18 +963,21 @@ async function loadAnalytics() {
       </div>`;
     }
 
-    if (ins.winning_patterns && ins.winning_patterns.length) {
-      iz += `<div class="card">
-        <div class="insight-label"><div class="dot green"></div>Що працює</div>
-        ${ins.winning_patterns.map(w => `<div class="insight-item">✓ ${w}</div>`).join('')}
-      </div>`;
-    }
-
-    if (ins.avoid_patterns && ins.avoid_patterns.length) {
-      iz += `<div class="card">
-        <div class="insight-label"><div class="dot red"></div>Чого уникати</div>
-        ${ins.avoid_patterns.map(a => `<div class="insight-item">✗ ${a}</div>`).join('')}
-      </div>`;
+    if ((ins.winning_patterns && ins.winning_patterns.length) || (ins.avoid_patterns && ins.avoid_patterns.length)) {
+      iz += `<div class="pair-grid">`;
+      if (ins.winning_patterns && ins.winning_patterns.length) {
+        iz += `<div class="card">
+          <div class="insight-label"><div class="dot green"></div>Що працює</div>
+          ${ins.winning_patterns.map(w => `<div class="insight-item">✓ ${w}</div>`).join('')}
+        </div>`;
+      }
+      if (ins.avoid_patterns && ins.avoid_patterns.length) {
+        iz += `<div class="card">
+          <div class="insight-label"><div class="dot red"></div>Чого уникати</div>
+          ${ins.avoid_patterns.map(a => `<div class="insight-item">✗ ${a}</div>`).join('')}
+        </div>`;
+      }
+      iz += `</div>`;
     }
 
     if (ins.boost_topics && ins.boost_topics.length) {
