@@ -105,7 +105,7 @@ def api_plan_generate():
     count = int(request.json.get("count", 10)) if request.is_json else 10
     insights = load_json(INSIGHTS_FILE, {"insights": None})
     threads_posts = load_json(LOG_FILE, [])
-    posts_with_metrics = [p for p in threads_posts if p.get("metrics") and p.get("text")]
+    posts_with_metrics = [p for p in threads_posts if p.get("metrics") and p.get("text") and p.get("source") != "manual"]
     top_posts = sorted(posts_with_metrics, key=lambda p: engagement_score(p["metrics"]), reverse=True)
     top_texts = [p["text"] for p in top_posts[:8]]
 

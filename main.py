@@ -464,6 +464,8 @@ def analyze_and_learn():
     for p in posts:
         if p.get("status") != "published" or not p.get("metrics") or not p.get("text"):
             continue
+        if p.get("source") == "manual":
+            continue  # особисті пости видно в статистиці, але в самонавчання не йдуть
         age = post_age_hours(p)
         if age is None or age < ANALYSIS_MIN_AGE_HOURS:
             continue
@@ -1125,10 +1127,74 @@ def post_to_threads():
         save_log(posts)
 
 
+def sync_manual_posts():
+    """Підтягує УСІ пости акаунту з Threads API (включно з тими що опубліковані вручну
+    через сам додаток, не через бота) — щоб вони було видно в статистиці на сайті.
+    Позначаються source='manual' і НЕ беруть участі в самонавчанні (analyze_and_learn,
+    генерація ідей) — там для них немає topic_id/angle_id і вони явно відфільтровані."""
+    if not THREADS_ACCESS_TOKEN or not THREADS_USER_ID:
+        return
+
+    posts = load_log()
+    known_ids = {p.get("post_id") for p in posts if p.get("post_id")}
+    added = 0
+
+    try:
+        url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+        params = {
+            "fields": "id,permalink,text,timestamp,media_type",
+            "limit": 50,
+            "access_token": THREADS_ACCESS_TOKEN
+        }
+        after_cursor = None
+
+        for _page in range(4):  # до 4 сторінок по 50 = 200 останніх постів акаунту
+            page_params = dict(params)
+            if after_cursor:
+                page_params["after"] = after_cursor
+
+            resp = requests.get(url, params=page_params, timeout=15)
+            data = resp.json()
+
+            for item in data.get("data", []):
+                post_id = item.get("id")
+                if not post_id or post_id in known_ids:
+                    continue
+                try:
+                    ts = datetime.strptime(item["timestamp"][:19], "%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    ts = datetime.now()
+                posts.append({
+                    "timestamp": ts.strftime("%d.%m.%Y %H:%M"),
+                    "type": "manual",
+                    "topic_id": None,
+                    "angle_id": None,
+                    "text": item.get("text", ""),
+                    "post_id": post_id,
+                    "status": "published",
+                    "source": "manual"
+                })
+                known_ids.add(post_id)
+                added += 1
+
+            cursors = data.get("paging", {}).get("cursors", {})
+            after_cursor = cursors.get("after")
+            if not after_cursor or not data.get("data"):
+                break
+
+        if added:
+            save_log(posts)
+            print(f"Синхронізовано {added} нових постів з акаунту (в т.ч. можливо особисті)")
+
+    except Exception as e:
+        print(f"Помилка синхронізації постів акаунту: {e}")
+
+
 def daily_maintenance():
-    """Щоденне: підтягує метрики + оновлює аналіз"""
+    """Щоденне: синхронізує пости акаунту, підтягує метрики, оновлює аналіз"""
     print("\nЩоденне оновлення метрик...")
     try:
+        sync_manual_posts()
         update_metrics()
         analyze_and_learn()
     except Exception as e:
@@ -1282,7 +1348,7 @@ def generate_content_ideas(count=10):
     паттерном, GPT має підібрати інший, а не видавати ідею що ні на що не спирається."""
     insights = load_insights()
     posts = load_log()
-    posts_with_metrics = [p for p in posts if p.get("metrics") and p.get("text")]
+    posts_with_metrics = [p for p in posts if p.get("metrics") and p.get("text") and p.get("source") != "manual"]
     top_posts = sorted(posts_with_metrics, key=lambda p: engagement_score(p["metrics"]), reverse=True)
     top_texts = [p["text"] for p in top_posts[:8]]
 
