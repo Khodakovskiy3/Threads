@@ -32,6 +32,13 @@ TELEGRAM_LOG_FILE = "telegram_log"
 INSIGHTS_FILE = "style_insights"
 CONTENT_PLAN_FILE = "content_plan"
 VIDEO_STATS_FILE = "video_stats"
+NOTIFICATION_SETTINGS_FILE = "notification_settings"
+
+DEFAULT_NOTIFICATION_SETTINGS = {
+    "post_stats": True,
+    "leads": True,
+    "selfpromo": True,
+}
 
 app = Flask(__name__)
 init_db()
@@ -299,6 +306,23 @@ def api_insights():
     return jsonify(load_json(INSIGHTS_FILE, {"insights": None}))
 
 
+# ===== API: налаштування сповіщень бота (керується тільки звідси, не з самого бота) =====
+@app.route("/api/notification_settings")
+def api_notification_settings_get():
+    return jsonify(load_json(NOTIFICATION_SETTINGS_FILE, DEFAULT_NOTIFICATION_SETTINGS))
+
+
+@app.route("/api/notification_settings", methods=["POST"])
+def api_notification_settings_set():
+    body = request.json or {}
+    current = load_json(NOTIFICATION_SETTINGS_FILE, DEFAULT_NOTIFICATION_SETTINGS)
+    for key in DEFAULT_NOTIFICATION_SETTINGS:
+        if key in body:
+            current[key] = bool(body[key])
+    save_json(NOTIFICATION_SETTINGS_FILE, current)
+    return jsonify(current)
+
+
 # ===== HTML =====
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="uk">
@@ -522,6 +546,27 @@ input:focus, select:focus, textarea:focus { border-color:var(--accent); }
 @keyframes spin { to{transform:rotate(360deg)} }
 .section-title { font-size:16px; font-weight:700; margin-bottom:14px; }
 
+/* ── Toggle switch (сповіщення) ── */
+.toggle-row {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 2px; border-bottom:1px solid var(--border);
+}
+.toggle-row:last-child { border-bottom:none; }
+.toggle-label { font-size:14px; color:var(--text); font-weight:500; }
+.toggle-sub { font-size:12px; color:var(--muted); margin-top:2px; }
+.switch { position:relative; width:44px; height:26px; flex-shrink:0; }
+.switch input { opacity:0; width:0; height:0; }
+.switch-track {
+  position:absolute; inset:0; background:var(--surface3); border:1px solid var(--border);
+  border-radius:100px; cursor:pointer; transition:background 0.2s;
+}
+.switch-track:before {
+  content:""; position:absolute; width:20px; height:20px; left:2px; top:2px;
+  background:var(--muted); border-radius:50%; transition:transform 0.2s, background 0.2s;
+}
+.switch input:checked + .switch-track { background:linear-gradient(135deg, var(--accent), var(--accent2)); border-color:transparent; }
+.switch input:checked + .switch-track:before { transform:translateX(18px); background:#fff; }
+
 /* ── Paused badge ── */
 .paused-item {
   background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2);
@@ -576,6 +621,7 @@ input:focus, select:focus, textarea:focus { border-color:var(--accent); }
 <div id="posts" class="section"></div>
 <div id="plan" class="section"></div>
 <div id="videos" class="section"></div>
+<div id="notifications" class="section"></div>
 
 <!-- Bottom Navigation -->
 <nav class="bottom-nav">
@@ -608,6 +654,13 @@ input:focus, select:focus, textarea:focus { border-color:var(--accent); }
       <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
     </svg>
     Відео
+  </div>
+  <div class="nav-item" data-tab="notifications">
+    <div class="nav-bar"></div>
+    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+    </svg>
+    Сповіщення
   </div>
 </nav>
 
@@ -1051,12 +1104,62 @@ async function addVideo(btn) {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// ── NOTIFICATIONS SECTION ──
+// ═══════════════════════════════════════════════════
+const NOTIF_LABELS = {
+  post_stats: ['Статистика постів', 'Повідомлення в бота коли для допису підтягнулись перегляди/лайки'],
+  leads: ['Потенційні клієнти', 'Сповіщення коли хтось на Threads пише що потрібен розробник сайту'],
+  selfpromo: ['Саморекламні тредси', 'Сповіщення про тредси конкурентів з готовою відповіддю на підтвердження'],
+};
+
+async function loadNotifications() {
+  const el = document.getElementById('notifications');
+  el.innerHTML = loader();
+  try {
+    const res = await fetch(withToken('/api/notification_settings'));
+    if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
+    const settings = await res.json();
+
+    el.innerHTML = `<div class="card">
+      ${Object.entries(NOTIF_LABELS).map(([key, [label, sub]]) => `
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">${label}</div>
+            <div class="toggle-sub">${sub}</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" ${settings[key] ? 'checked' : ''} onchange="toggleNotification('${key}', this.checked)">
+            <span class="switch-track"></span>
+          </label>
+        </div>
+      `).join('')}
+    </div>
+    <div class="stat-sub" style="padding:0 4px">Це керує тим, які повідомлення шле бот в Telegram. Сам бот більше нічого не налаштовує — все тут.</div>`;
+  } catch (err) {
+    el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
+  }
+}
+
+async function toggleNotification(key, value) {
+  try {
+    await fetch(withToken('/api/notification_settings'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({[key]: value})
+    });
+  } catch (err) {
+    console.error('Не вдалось зберегти налаштування', err);
+  }
+}
+
 // ── Section loader map ──
 const sectionLoaders = {
   analytics: loadAnalytics,
   posts: loadPosts,
   plan: loadPlan,
   videos: loadVideos,
+  notifications: loadNotifications,
 };
 
 // Initial load

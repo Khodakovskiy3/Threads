@@ -31,17 +31,18 @@ CONTENT_PLAN_FILE = "content_plan"  # той самий план що і на в
 POSTING_JITTER_FILE = "posting_jitter"  # рандомізований час наступної публікації
 TRENDS_FILE = "content_trends"  # щоденний аналіз трендів у ніші
 
-# Постійна клавіатура внизу чату — щоб не пам'ятати команди напам'ять
+# Постійна клавіатура внизу чату — щоб не пам'ятати команди напам'ять.
+# Сайт (dashboard.py) більше не відкривається через бота — це окремий постійний сайт,
+# налаштування сповіщень тепер теж там, а не тут. Бот лишається тільки для сповіщень і швидких команд.
 MAIN_KEYBOARD = {
     "keyboard": [
-        ["Панель", "Аналіз"],
-        ["Нові ідеї", "Допомога"]
+        ["Аналіз", "Нові ідеї"],
+        ["Допомога"]
     ],
     "resize_keyboard": True
 }
 
 BOT_COMMANDS = [
-    {"command": "dashboard", "description": "Відкрити панель (контент-план, пости, відео)"},
     {"command": "analysis", "description": "Останній аналіз постів текстом"},
     {"command": "ideas", "description": "Згенерувати нові ідеї для постів"},
     {"command": "help", "description": "Що вміє бот"},
@@ -58,8 +59,6 @@ TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hoda
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
-DASHBOARD_URL = os.getenv("DASHBOARD_URL")    # публічний домен сервісу dashboard.py на Railway
-DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")  # той самий токен що і в dashboard.py
 
 SEEN_LEADS_FILE = "seen_leads"
 SEEN_SELFPROMO_FILE = "seen_selfpromo"
@@ -67,6 +66,19 @@ PENDING_REPLIES_FILE = "pending_replies"
 TELEGRAM_OFFSET_FILE = "telegram_offset"
 REPLY_TEMPLATE_STATE_FILE = "reply_template_state"
 REAL_CONTEXT_FILE = "real_context"  # реальні ситуації від Романа для storytelling_client (через "контекст: ...")
+NOTIFICATION_SETTINGS_FILE = "notification_settings"  # налаштовується на сайті (dashboard.py), не в боті
+
+DEFAULT_NOTIFICATION_SETTINGS = {
+    "post_stats": True,   # повідомлення "допис набрав стільки перегладів..."
+    "leads": True,        # сповіщення про потенційних клієнтів
+    "selfpromo": True,    # сповіщення про саморекламу конкурентів
+}
+
+
+def notifications_enabled(key):
+    """Читає налаштування сповіщень зі сховища — керується з сайту, не з бота."""
+    settings = load_json(NOTIFICATION_SETTINGS_FILE, DEFAULT_NOTIFICATION_SETTINGS)
+    return settings.get(key, True)
 
 # ===== САМОНАВЧАННЯ: пороги й параметри пауз =====
 MIN_POSTS_FOR_ANALYSIS = 12       # мінімум постів з метриками (старших ANALYSIS_MIN_AGE_HOURS) для першого аналізу
@@ -391,8 +403,10 @@ def fetch_post_metrics(post_id):
 
 
 def notify_post_metrics(post, metrics):
-    """Разове інформаційне повідомлення власнику коли для поста вперше підтягнулись метрики —
-    саме це і замінює потребу заходити кудись дивитись циферки вручну."""
+    """Разове інформаційне повідомлення власнику коли для поста вперше підтягнулись метрики.
+    Вмикається/вимикається на сайті (вкладка Сповіщення), а не в самому боті."""
+    if not notifications_enabled("post_stats"):
+        return
     preview = (post.get("text") or "").replace("\n", " ").strip()[:80]
     message = (
         f"Статистика допису ({post.get('type', '?')}):\n"
@@ -1133,7 +1147,7 @@ def answer_bot_question(question):
         if not with_metrics and not video_stats:
             send_telegram_dm(
                 "Поки що замало даних (нема опублікованих постів з метриками чи доданих відео в "
-                "таблицю), щоб відповісти конкретно. Додай пару відео в панель (/dashboard) або "
+                "таблицю на сайті), щоб відповісти конкретно. Додай пару відео на сайті або "
                 "почекай поки набіжать перегляди на пости — і питай знову."
             )
             return
@@ -1265,21 +1279,18 @@ def generate_content_ideas(count=10):
 
 
 def build_help_text():
-    link = dashboard_link()
-    link_line = f"Сайт зі статистикою (постійне посилання, збережи в закладки): {link}\n\n" if link else ""
     return (
         "Що вміє бот:\n\n"
         "Пости в Threads публікуються самі по розкладу (06-12 раз на 2 год, 12-16 щогодини, "
         "16-21 раз на 2 год, 21-23 один пост, 23-06 тиша).\n\n"
-        f"{link_line}"
-        "Панель — те саме посилання на сайт текстом.\n"
         "Аналіз — останній аналіз того що добре заходить, текстом прямо в чат.\n"
         "Нові ідеї — згенерувати ще ідей для контент-плану.\n\n"
         "Просто питання текстом (без /) — бот відповість спираючись на реальну статистику акаунту.\n\n"
         "Напиши 'контекст: ...' з реальною ситуацією з роботи — вона піде в наступний пост-історію "
         "про клієнта замість вигаданої.\n\n"
         "Після кожного поста, коли підтягнуться перегляди/лайки (десь через 3+ год), бот сам "
-        "пришле повідомлення зі статистикою цього конкретного допису.\n\n"
+        "пришле повідомлення зі статистикою цього конкретного допису — це і є основна функція бота, "
+        "самі сповіщення налаштовуються (вмикаються/вимикаються) на сайті.\n\n"
         "Сповіщення про лідів і саморекламні тредси, а також запити на публікацію в Telegram-канал "
         "приходять самі, з кнопками підтвердження.\n\n"
         "Алгоритм написання постів сам аналізує статистику, паузить теми і кути які реально погано "
@@ -1338,31 +1349,6 @@ def register_bot_commands():
         print(f"Не вдалось зареєструвати команди бота: {e}")
 
 
-def dashboard_link():
-    """Постійне посилання на сайт зі статистикою. Однакове завжди, поки не міняються
-    DASHBOARD_URL/DASHBOARD_TOKEN в Railway Variables — можна зберігати в закладки браузера."""
-    if not DASHBOARD_URL:
-        return None
-    dash_url = DASHBOARD_URL
-    if DASHBOARD_TOKEN:
-        dash_url += f"?token={DASHBOARD_TOKEN}"
-    return dash_url
-
-
-def send_dashboard_button():
-    """Раніше відкривало сайт як Telegram Mini App (web_app кнопка) — та вбудована вьюха
-    Telegram щоразу перезавантажує сторінку з нуля, тому виглядало ніби сайт "скидається".
-    Тепер просто шлемо звичайне посилання — відкривається в реальному браузері, залишається
-    тим самим завжди, можна зберегти в закладки і більше не питати бота."""
-    link = dashboard_link()
-    if not link:
-        send_telegram_dm("Сайт зі статистикою ще не налаштований (немає DASHBOARD_URL)")
-        return
-    send_telegram_dm(
-        f"Постійне посилання на сайт зі статистикою (не змінюється, можна зберегти в закладки):\n{link}"
-    )
-
-
 # ===== ПОШУК ЛІДІВ І САМОРЕКЛАМИ ЧЕРЕЗ GOOGLE =====
 def google_search(query, num=10):
     """Пошук по публічному Google-індексу threads.net.
@@ -1400,7 +1386,10 @@ def get_next_template():
 
 def search_leads():
     """Шукає тредси де хтось пише що потрібен розробник сайту / відкрита вакансія.
-    Тільки сповіщення в Telegram, без автовідповіді — відповідати треба самому і швидко."""
+    Тільки сповіщення в Telegram, без автовідповіді — відповідати треба самому і швидко.
+    Вмикається/вимикається на сайті — якщо вимкнено, навіть не витрачаємо Google-квоту на пошук."""
+    if not notifications_enabled("leads"):
+        return
     seen = load_json(SEEN_LEADS_FILE, [])
     query = build_or_query(LEAD_KEYWORDS)
 
@@ -1433,7 +1422,10 @@ def search_leads():
 def search_selfpromo():
     """Шукає тредси де хтось постить свої послуги розробки сайтів.
     Готує чергову шаблонну відповідь і шле в Telegram на підтвердження —
-    ніякої автопублікації без дозволу власника."""
+    ніякої автопублікації без дозволу власника.
+    Вмикається/вимикається на сайті — якщо вимкнено, навіть не витрачаємо Google-квоту на пошук."""
+    if not notifications_enabled("selfpromo"):
+        return
     seen = load_json(SEEN_SELFPROMO_FILE, [])
     pending = load_json(PENDING_REPLIES_FILE, {})
     query = build_or_query(SELFPROMO_KEYWORDS)
@@ -1512,17 +1504,11 @@ def poll_telegram_updates():
 
         # /start — вітання + постійна клавіатура з кнопками замість команд напам'ять
         if text == "/start":
-            link = dashboard_link()
-            link_note = f"\n\nСайт зі статистикою (постійне посилання, збережи в закладки): {link}" if link else ""
             send_telegram_dm(
-                f"Готово, бот на зв'язку. Знизу є кнопки для швидкого доступу, або просто питай текстом.{link_note}",
+                "Готово, бот на зв'язку. Знизу є кнопки для швидкого доступу, або просто питай текстом. "
+                "Статистику і налаштування сповіщень дивись на сайті.",
                 reply_markup=MAIN_KEYBOARD
             )
-            continue
-
-        # Панель — команда /dashboard або кнопка клавіатури
-        if text in ("/dashboard", "Панель"):
-            send_dashboard_button()
             continue
 
         # Аналіз — останній style_insights.json прямо текстом в чат
@@ -1554,7 +1540,7 @@ def poll_telegram_updates():
                 send_telegram_dm("Записав. Використаю в наступному пості-історії про клієнта.")
             continue
 
-        # Нові ідеї — генерує і одразу показує текстом (та ж таблиця що і в /dashboard)
+        # Нові ідеї — генерує і одразу показує текстом (той самий контент-план що і на сайті)
         if text in ("/ideas", "Нові ідеї"):
             try:
                 ideas = generate_content_ideas(10)
