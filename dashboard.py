@@ -857,7 +857,7 @@ async function loadAnalytics() {
     if (ins.post_improvements) {
       iz += `<div class="card">
         <div class="insight-label"><div class="dot blue"></div>Покращення слабких постів</div>
-        ${ins.post_improvements.split('\n').filter(l=>l.trim()).map(l =>
+        ${ins.post_improvements.split('\\n').filter(l=>l.trim()).map(l =>
           `<div class="improvement-card">${l}</div>`).join('')}
       </div>`;
     }
