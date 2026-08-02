@@ -61,6 +61,11 @@ GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 TELEGRAM_USER_CHAT_ID = os.getenv("TELEGRAM_USER_CHAT_ID")  # особистий чат з ботом (не канал)
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # опціонально — авто-оновлення статистики YouTube Shorts
 
+# Instagram/TikTok підключаються через OAuth на сайті (dashboard.py, /auth/instagram/start,
+# /auth/tiktok/start) — токени лежать в тій самій таблиці SOCIAL_TOKENS_FILE, тут їх тільки читаємо
+# щоб періодично оновлювати вже додані відео (так само як для Threads і YouTube).
+SOCIAL_TOKENS_FILE = "social_tokens"
+
 SEEN_LEADS_FILE = "seen_leads"
 SEEN_SELFPROMO_FILE = "seen_selfpromo"
 PENDING_REPLIES_FILE = "pending_replies"
@@ -1266,11 +1271,69 @@ def resolve_youtube_metrics(video_id):
         return None
 
 
+def resolve_instagram_metrics_by_id(media_id):
+    """Instagram Graph API insights по вже відомому media_id (збережений при першому
+    підключенні відео через OAuth-акаунт на сайті — тут повторний пошук по URL не потрібен)."""
+    tokens = load_json(SOCIAL_TOKENS_FILE, {})
+    ig = tokens.get("instagram")
+    if not ig or not ig.get("access_token") or not media_id:
+        return None
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/v19.0/{media_id}/insights",
+            params={"metric": "plays,likes,comments,shares,saved,reach", "access_token": ig["access_token"]},
+            timeout=15,
+        )
+        data = resp.json()
+        metrics = {}
+        for item_data in data.get("data", []):
+            val = item_data.get("values", [{}])[0].get("value", 0)
+            metrics[item_data["name"]] = val
+        return {
+            "views": metrics.get("plays", metrics.get("reach", 0)),
+            "likes": metrics.get("likes", 0),
+            "comments": metrics.get("comments", 0),
+            "shares": metrics.get("shares", 0),
+        }
+    except Exception as e:
+        print(f"Помилка resolve_instagram_metrics_by_id: {e}")
+        return None
+
+
+def resolve_tiktok_metrics_by_id(video_id):
+    """TikTok video.query по вже відомому video_id (без повторного пошуку по посиланню)."""
+    tokens = load_json(SOCIAL_TOKENS_FILE, {})
+    tt = tokens.get("tiktok")
+    if not tt or not tt.get("access_token") or not video_id:
+        return None
+    try:
+        resp = requests.post(
+            "https://open.tiktokapis.com/v2/video/query/",
+            headers={"Authorization": f"Bearer {tt['access_token']}", "Content-Type": "application/json"},
+            params={"fields": "id,view_count,like_count,comment_count,share_count"},
+            json={"filters": {"video_ids": [video_id]}},
+            timeout=15,
+        )
+        videos = resp.json().get("data", {}).get("videos", [])
+        if not videos:
+            return None
+        v = videos[0]
+        return {
+            "views": v.get("view_count", 0),
+            "likes": v.get("like_count", 0),
+            "comments": v.get("comment_count", 0),
+            "shares": v.get("share_count", 0),
+        }
+    except Exception as e:
+        print(f"Помилка resolve_tiktok_metrics_by_id: {e}")
+        return None
+
+
 def update_video_stats():
-    """Періодично оновлює цифри для відео доданих на сайті — тільки для Threads і YouTube,
-    бо для них є спосіб отримати статистику без ручного вводу (media_id / video_id збережені
-    при додаванні відео на сайті). TikTok і Instagram Reels лишаються ручними — нема офіційного
-    способу дістати їхню статистику без повного OAuth-підключення акаунту як власника контенту."""
+    """Періодично оновлює цифри для відео доданих на сайті — для Threads і YouTube завжди
+    (публічні API), для Instagram Reels і TikTok тільки якщо власник підключив акаунт через
+    OAuth на сайті (/auth/instagram/start, /auth/tiktok/start). Без підключення ці два лишаються
+    ручними — без реального акаунту-власника контенту офіційного способу дістати статистику нема."""
     videos = load_json(VIDEO_STATS_FILE, [])
     updated = False
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -1296,12 +1359,32 @@ def update_video_stats():
                     v["comments"] = metrics.get("comments", v.get("comments"))
                     v["last_refreshed"] = now_str
                     updated = True
+
+            elif v.get("platform") == "reels" and v.get("ig_media_id"):
+                metrics = resolve_instagram_metrics_by_id(v["ig_media_id"])
+                if metrics:
+                    v["views"] = metrics.get("views", v.get("views"))
+                    v["likes"] = metrics.get("likes", v.get("likes"))
+                    v["comments"] = metrics.get("comments", v.get("comments"))
+                    v["shares"] = metrics.get("shares", v.get("shares"))
+                    v["last_refreshed"] = now_str
+                    updated = True
+
+            elif v.get("platform") == "tiktok" and v.get("tiktok_video_id"):
+                metrics = resolve_tiktok_metrics_by_id(v["tiktok_video_id"])
+                if metrics:
+                    v["views"] = metrics.get("views", v.get("views"))
+                    v["likes"] = metrics.get("likes", v.get("likes"))
+                    v["comments"] = metrics.get("comments", v.get("comments"))
+                    v["shares"] = metrics.get("shares", v.get("shares"))
+                    v["last_refreshed"] = now_str
+                    updated = True
         except Exception as e:
             print(f"Помилка оновлення відео {v.get('url')}: {e}")
 
     if updated:
         save_json(VIDEO_STATS_FILE, videos)
-        print("Статистика відео (Threads/YouTube) оновлена")
+        print("Статистика відео оновлена")
 
 
 def answer_bot_question(question):
