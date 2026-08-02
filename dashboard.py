@@ -151,7 +151,7 @@ def api_plan_generate():
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     for line in lines:
         plan.append({
-            "id": f"idea-{len(plan)}-{int(datetime.now().timestamp())}",
+            "id": f"idea-{len(plan)}-{int(datetime.now().timestamp()*1000)}-{random.randint(1000, 9999)}",
             "text": line,
             "status": "todo",
             "created_at": now,
@@ -316,7 +316,7 @@ def api_videos_add():
     url = body.get("url", "")
 
     entry = {
-        "id": f"video-{int(datetime.now().timestamp())}",
+        "id": f"video-{int(datetime.now().timestamp()*1000)}-{random.randint(1000, 9999)}",
         "platform": platform,
         "url": url,
         "views": body.get("views"),
@@ -361,9 +361,32 @@ def api_videos_add():
     return jsonify(entry)
 
 
+@app.route("/api/videos/<video_id>", methods=["DELETE"])
+def api_videos_delete(video_id):
+    videos = load_json(VIDEO_STATS_FILE, [])
+    remaining = [v for v in videos if v.get("id") != video_id]
+    if len(remaining) == len(videos):
+        return jsonify({"error": "not found"}), 404
+    save_json(VIDEO_STATS_FILE, remaining)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/insights")
 def api_insights():
     return jsonify(load_json(INSIGHTS_FILE, {"insights": None}))
+
+
+# ===== API: примусово попросити воркер (main.py) прогнати аналіз негайно =====
+# daily_maintenance в main.py йде за таймером кожні 4 години, а таймер скидається при
+# кожному redeploy — тому щоб не чекати до 4 годин після кожного оновлення коду,
+# сайт може виставити цей прапорець, і воркер підхопить його в межах хвилини.
+FORCE_REFRESH_FILE = "force_analysis_refresh"
+
+
+@app.route("/api/analyze/refresh", methods=["POST"])
+def api_force_refresh():
+    save_json(FORCE_REFRESH_FILE, {"requested": True, "requested_at": datetime.now().strftime("%d.%m.%Y %H:%M")})
+    return jsonify({"ok": True})
 
 
 # ===== API: налаштування сповіщень бота (керується тільки звідси, не з самого бота) =====
@@ -668,6 +691,9 @@ input:focus, select:focus, textarea:focus { border-color:var(--accent); }
     <div class="stat-card"><div class="stat-label">Всього переглядів</div><div class="stat-value" style="color:var(--border)">—</div></div>
     <div class="stat-card"><div class="stat-label">Топ скор</div><div class="stat-value" style="color:var(--border)">—</div></div>
   </div>
+  <button class="btn btn-secondary" style="margin-bottom:12px" onclick="forceRefreshAnalysis(this)">
+    Оновити аналіз зараз (не чекати до 4 год)
+  </button>
   <div id="insights-zone"><div class="loader"><div class="spinner"></div>Завантаження...</div></div>
   <div class="card">
     <div class="insight-label"><div class="dot blue"></div>Аналіз поста за посиланням</div>
@@ -962,6 +988,21 @@ async function loadAnalytics() {
   }
 }
 
+async function forceRefreshAnalysis(btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Прошу воркер оновити...';
+  try {
+    await fetch(withToken('/api/analyze/refresh'), {method: 'POST'});
+    btn.textContent = 'Готово, оновиться протягом хвилини';
+    setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 8000);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert('Не вдалось: ' + err.message);
+  }
+}
+
 async function analyzePost() {
   const url = document.getElementById('analyze-url').value.trim();
   if (!url) return;
@@ -1130,7 +1171,7 @@ async function loadVideos() {
       <button class="btn btn-primary" onclick="addVideo(this)">Додати відео</button>
     </div>
     ${videos.length ? videos.slice().reverse().map(v => `
-      <div class="card">
+      <div class="card" id="video-${v.id}">
         <div class="post-meta">
           <span class="tag">${v.platform}</span>
           <span>${v.added_at}</span>
@@ -1138,12 +1179,28 @@ async function loadVideos() {
             ? '<span style="color:var(--success)">· оновлюється само</span>'
             : (v.auto_fetched ? '<span style="color:var(--success)">· авто (одноразово)</span>' : '<span style="color:var(--muted)">· вручну</span>')}
           ${v.last_refreshed ? `<span style="color:var(--muted)">· ${v.last_refreshed}</span>` : ''}
+          <span style="margin-left:auto;cursor:pointer;color:var(--muted)" title="Видалити" onclick="deleteVideo('${v.id}')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+          </span>
         </div>
         <a class="video-card-url" href="${v.url}" target="_blank">${v.url}</a>
         ${metricPills({views:v.views, likes:v.likes, replies:v.comments, reposts:v.shares, quotes:v.quotes})}
       </div>
     `).join('') : empty('🎬', 'Відео ще не додано')}
   `;
+}
+
+async function deleteVideo(id) {
+  if (!confirm('Видалити цей запис?')) return;
+  try {
+    await fetch(withToken(`/api/videos/${id}`), {method: 'DELETE'});
+    const card = document.getElementById('video-' + id);
+    if (card) card.remove();
+  } catch (err) {
+    alert('Не вдалось видалити: ' + err.message);
+  }
 }
 
 async function addVideo(btn) {

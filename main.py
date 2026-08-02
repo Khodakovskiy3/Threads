@@ -1201,6 +1201,23 @@ def daily_maintenance():
         alert_error("daily_maintenance (метрики/аналіз)", e)
 
 
+FORCE_REFRESH_FILE = "force_analysis_refresh"
+
+
+def check_manual_refresh_request():
+    """Кнопка "Оновити аналіз зараз" на сайті виставляє прапорець в сховищі — таймер
+    daily_maintenance йде раз в 4 години і скидається при кожному redeploy, тому без цього
+    довелось би чекати до 4 годин щоб побачити ефект від щойно задеплоєних змін."""
+    try:
+        flag = load_json(FORCE_REFRESH_FILE, {"requested": False})
+        if flag.get("requested"):
+            save_json(FORCE_REFRESH_FILE, {"requested": False})
+            print("Отримано запит на негайне оновлення аналізу з сайту")
+            daily_maintenance()
+    except Exception as e:
+        alert_error("check_manual_refresh_request", e)
+
+
 def resolve_youtube_metrics(video_id):
     """YouTube Data API v3 — статистика публічного відео просто за ключем, без OAuth.
     На відміну від TikTok чи Instagram Reels, де офіційного простого способу нема,
@@ -1400,7 +1417,7 @@ def generate_content_ideas(count=10):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     for line in lines:
         plan.append({
-            "id": f"idea-{len(plan)}-{int(datetime.now().timestamp())}",
+            "id": f"idea-{len(plan)}-{int(datetime.now().timestamp()*1000)}-{random.randint(1000, 9999)}",
             "text": line,
             "status": "todo",
             "created_at": now,
@@ -1749,6 +1766,7 @@ schedule.every(4).hours.do(update_video_stats)         # авто-оновлен
 schedule.every(30).minutes.do(search_leads)            # пошук лідів (потрібен розробник)
 schedule.every(30).minutes.do(search_selfpromo)        # пошук самореклами конкурентів
 schedule.every(1).minutes.do(poll_telegram_updates)    # перевірка натискань кнопок
+schedule.every(1).minutes.do(check_manual_refresh_request)  # кнопка "Оновити аналіз зараз" на сайті
 schedule.every(24).hours.do(refresh_trend_context)    # оновлення трендів у ніші
 
 def run_dashboard_in_background():
