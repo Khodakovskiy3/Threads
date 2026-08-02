@@ -684,27 +684,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root {
-  /* Задана палітра: від найтемнішого до найсвітлішого */
-  --c1: #738488;
-  --c2: #A6B6BA;
-  --c3: #D0D8DA;
-  --c4: #E1DDD7;
-  --c5: #EFECE7;
-
-  --bg: var(--c5);
-  --surface: rgba(255,255,255,0.45);
-  --surface2: rgba(255,255,255,0.55);
-  --surface3: rgba(255,255,255,0.65);
-  --border: rgba(115,132,136,0.22);
-  --glass-blur: blur(28px) saturate(180%);
-  --accent: #738488;
-  --accent2: #A6B6BA;
-  --accent-glow: rgba(115,132,136,0.28);
-  --text: #33393a;
-  --muted: #738488;
-  --success: #5f9384;
-  --warning: #b4894a;
-  --danger: #b25a52;
+  /* Задана палітра (темна, лаймовий акцент) */
+  --bg: #181818;
+  --surface: #242424;
+  --surface2: #2D2D2D;
+  --surface3: #333333;
+  --border: #343434;
+  --glass-blur: none;
+  --accent: #C7F060;
+  --accent2: #A8D84A;
+  --accent-glow: rgba(199,240,96,0.25);
+  --accent-ink: #1c2408;
+  --purple: #8C7BFF;
+  --orange: #F89A52;
+  --text: #F3F3F3;
+  --muted: #A4A4A4;
+  --success: #A8D84A;
+  --warning: #F89A52;
+  --danger: #e5657a;
   --nav-w: 88px;
   --shell: 22px;
 }
@@ -721,28 +718,15 @@ body {
   position: relative;
 }
 
-/* ── Ambient liquid-glass background blobs ── */
-body::before, body::after {
-  content:""; position:fixed; z-index:-1; border-radius:50%;
-  filter: blur(100px); pointer-events:none;
-}
-body::before {
-  width:640px; height:640px; top:-200px; right:-160px;
-  background: radial-gradient(circle, rgba(166,182,186,0.55), transparent 70%);
-}
-body::after {
-  width:560px; height:560px; bottom:-180px; left:calc(var(--nav-w) - 60px);
-  background: radial-gradient(circle, rgba(208,216,218,0.55), transparent 70%);
-}
+body::before, body::after { content: none; }
 
 /* ── Header ── */
 .header {
   position: sticky; top:20px; z-index: 100;
-  background: rgba(255,255,255,0.5);
-  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid rgba(255,255,255,0.6);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 22px;
-  box-shadow: 0 8px 32px rgba(115,132,136,0.18), inset 0 1px 0 rgba(255,255,255,0.7);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
   padding: 15px 22px;
   margin-bottom: 18px;
   display: flex; align-items: center; justify-content: space-between;
@@ -756,10 +740,10 @@ body::after {
   animation: pulse 2s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-.header h1 { font-size:15px; font-weight:700; letter-spacing:-0.3px; color:#2c3233; }
+.header h1 { font-size:15px; font-weight:700; letter-spacing:-0.3px; color:var(--text); }
 .header .badge {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
-  color:#fff; font-size:11px; padding:3px 10px; border-radius:100px; font-weight:600;
+  color:var(--accent-ink); font-size:11px; padding:3px 10px; border-radius:100px; font-weight:700;
   box-shadow: 0 2px 10px var(--accent-glow);
 }
 
@@ -768,17 +752,16 @@ body::after {
 .section.active { display:block; animation: slideUp 0.22s ease; }
 @keyframes slideUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
 
-/* ── Sidebar Navigation (liquid glass, full-height dock) ── */
+/* ── Sidebar Navigation (full-height dock) ── */
 .sidebar {
   position: fixed; left:20px; top:20px; bottom:20px;
   width: var(--nav-w); z-index: 200;
   display:flex; flex-direction:column; align-items:center; gap:10px;
   padding: 22px 0;
-  background: rgba(255,255,255,0.45);
-  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid rgba(255,255,255,0.6);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 32px;
-  box-shadow: 0 8px 32px rgba(115,132,136,0.22), inset 0 1px 0 rgba(255,255,255,0.7);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
 }
 .sidebar::before {
   content:""; width:36px; height:2px; border-radius:2px;
@@ -791,22 +774,21 @@ body::after {
   position: relative; user-select:none;
 }
 .nav-icon { width:20px; height:20px; transition:transform 0.2s; }
-.nav-item:hover { color:var(--text); background: rgba(115,132,136,0.1); }
+.nav-item:hover { color:var(--text); background: var(--surface2); }
 .nav-item.active {
-  color:#fff;
+  color:var(--accent-ink);
   background: linear-gradient(135deg, var(--accent), var(--accent2));
-  box-shadow: 0 4px 18px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.3);
+  box-shadow: 0 4px 18px var(--accent-glow);
 }
 .nav-item.active .nav-icon { transform: scale(1.08); }
 .nav-bar { display:none; }
 
-/* ── Cards (frosted glass) ── */
+/* ── Cards ── */
 .card {
   background: var(--surface);
-  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--border);
   border-radius: 20px; padding:18px; margin-bottom:14px;
-  box-shadow: 0 4px 24px rgba(115,132,136,0.14), inset 0 1px 0 rgba(255,255,255,0.5);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
   transition: border-color 0.2s, background 0.2s;
 }
 .card:active { border-color: var(--accent); }
@@ -822,11 +804,16 @@ body::after {
 .stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px; }
 .stat-card {
   background: var(--surface);
-  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   border:1px solid var(--border);
   border-radius:18px; padding:16px 16px 14px;
-  box-shadow: 0 4px 20px rgba(115,132,136,0.14), inset 0 1px 0 rgba(255,255,255,0.5);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
+.stat-card.highlight {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-color: transparent; color: var(--accent-ink);
+}
+.stat-card.highlight .stat-label, .stat-card.highlight .stat-sub { color: rgba(28,36,8,0.65); }
+.stat-card.highlight .stat-value { color: var(--accent-ink); -webkit-text-fill-color: var(--accent-ink); background:none; }
 .stat-label { font-size:11px; color:var(--muted); margin-bottom:6px; font-weight:500; }
 .stat-value { font-size:26px; font-weight:800; letter-spacing:-1px; line-height:1; }
 .stat-value.accent { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
@@ -859,7 +846,7 @@ body::after {
 .post-text { font-size:14px; line-height:1.65; color:var(--text); }
 .metrics-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
 .metric-pill {
-  background:rgba(255,255,255,0.55); border:1px solid var(--border);
+  background:var(--surface2); border:1px solid var(--border);
   border-radius:100px; padding:4px 10px; font-size:12px;
   display:flex; align-items:center; gap:5px; color:var(--muted);
 }
@@ -868,8 +855,8 @@ body::after {
   display:inline-flex; align-items:center;
   padding:2px 8px; border-radius:100px; font-size:11px; font-weight:600;
 }
-.badge-src.threads { background:rgba(115,132,136,0.16); color:var(--accent); }
-.badge-src.telegram { background:rgba(95,147,132,0.16); color:var(--success); }
+.badge-src.threads { background:rgba(199,240,96,0.14); color:var(--accent); }
+.badge-src.telegram { background:rgba(140,123,255,0.16); color:var(--purple); }
 .score-badge {
   margin-left:auto; font-size:12px; font-weight:700;
   background: linear-gradient(135deg, var(--accent), var(--accent2));
@@ -886,27 +873,25 @@ body::after {
 }
 .btn:active { transform:scale(0.97); opacity:0.85; }
 .btn-primary {
-  background:linear-gradient(135deg, var(--accent), var(--accent2)); color:#fff;
-  box-shadow: 0 4px 18px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.25);
+  background:linear-gradient(135deg, var(--accent), var(--accent2)); color:var(--accent-ink); font-weight:700;
+  box-shadow: 0 4px 18px var(--accent-glow);
 }
 .btn-secondary {
-  background:rgba(255,255,255,0.55);
-  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  background:var(--surface2);
   color:var(--text); border:1px solid var(--border);
 }
 .btn-sm { padding:9px 14px; font-size:13px; border-radius:10px; width:auto; margin-bottom:0; }
 
 /* ── Inputs ── */
 input, select, textarea {
-  width:100%; background:rgba(255,255,255,0.5); color:var(--text);
+  width:100%; background:var(--surface2); color:var(--text);
   border:1px solid var(--border); border-radius:13px;
   padding:11px 14px; margin-bottom:10px; font-size:14px;
   font-family:inherit; outline:none; transition:border-color 0.2s, background 0.2s;
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
-input:focus, select:focus, textarea:focus { border-color:var(--accent); background:rgba(255,255,255,0.75); }
+input:focus, select:focus, textarea:focus { border-color:var(--accent); background:var(--surface3); }
 input::placeholder { color:var(--muted); opacity:0.8; }
-select option { background: var(--c5); color: var(--text); }
+select option { background: var(--surface2); color: var(--text); }
 .input-row { display:flex; gap:8px; }
 .input-row input { flex:1; margin-bottom:0; }
 
@@ -1016,7 +1001,7 @@ select option { background: var(--c5); color: var(--text); }
 <!-- Sections -->
 <div id="analytics" class="section active">
   <div class="stats-grid" id="stats-grid">
-    <div class="stat-card"><div class="stat-label">Всього постів</div><div class="stat-value" style="color:var(--border)">—</div></div>
+    <div class="stat-card highlight"><div class="stat-label">Всього постів</div><div class="stat-value" style="color:var(--border)">—</div></div>
     <div class="stat-card"><div class="stat-label">Сер. перегляди</div><div class="stat-value" style="color:var(--border)">—</div></div>
     <div class="stat-card"><div class="stat-label">Всього переглядів</div><div class="stat-value" style="color:var(--border)">—</div></div>
     <div class="stat-card"><div class="stat-label">Топ скор</div><div class="stat-value" style="color:var(--border)">—</div></div>
@@ -1103,18 +1088,18 @@ function chartDefaults() {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#EFECE7',
-        borderColor: '#D0D8DA',
+        backgroundColor: '#2D2D2D',
+        borderColor: '#343434',
         borderWidth: 1,
-        titleColor: '#33393a',
-        bodyColor: '#738488',
+        titleColor: '#F3F3F3',
+        bodyColor: '#A4A4A4',
         padding: 10,
         cornerRadius: 8,
       }
     },
     scales: {
-      x: { grid: { color: '#D0D8DA' }, ticks: { color: '#738488', font: { size: 11 } } },
-      y: { grid: { color: '#D0D8DA' }, ticks: { color: '#738488', font: { size: 11 } } }
+      x: { grid: { color: '#343434' }, ticks: { color: '#A4A4A4', font: { size: 11 } } },
+      y: { grid: { color: '#343434' }, ticks: { color: '#A4A4A4', font: { size: 11 } } }
     }
   };
 }
@@ -1187,7 +1172,7 @@ async function loadAnalytics() {
 
     // Оновлюємо stats grid
     document.getElementById('stats-grid').innerHTML = `
-      <div class="stat-card">
+      <div class="stat-card highlight">
         <div class="stat-label">Всього постів</div>
         <div class="stat-value">${all.length}</div>
         <div class="stat-sub">${threads.length} Threads · ${telegram.length} TG</div>
@@ -1224,7 +1209,7 @@ async function loadAnalytics() {
     if (ins.insights) {
       iz += `<div class="card">
         <div class="section-title" style="font-size:14px;margin-bottom:10px">Аналіз постів</div>
-        <div style="font-size:13px;line-height:1.65;color:#4a5254;margin-bottom:10px">${ins.insights}</div>
+        <div style="font-size:13px;line-height:1.65;color:#D0D0D0;margin-bottom:10px">${ins.insights}</div>
         <div class="stat-sub">Оновлено: ${ins.updated_at||'—'} · на основі ${ins.based_on_posts||'?'} постів</div>
       </div>`;
     }
@@ -1287,10 +1272,10 @@ async function loadAnalytics() {
           labels: chartPosts.map(p => (p.timestamp||'').slice(0,5)),
           datasets: [{
             data: chartPosts.map(p => p.metrics.views || 0),
-            borderColor: '#738488',
-            backgroundColor: 'rgba(115,132,136,0.15)',
+            borderColor: '#C7F060',
+            backgroundColor: 'rgba(199,240,96,0.15)',
             borderWidth: 2.5,
-            pointBackgroundColor: '#738488',
+            pointBackgroundColor: '#C7F060',
             pointRadius: 4,
             tension: 0.4,
             fill: true,
@@ -1472,7 +1457,7 @@ async function loadPlan() {
       <div class="card idea-card ${i.status==='done' ? 'done' : ''}" id="idea-${i.id}">
         <div class="idea-check ${i.status==='done'?'checked':''}" onclick="togglePlan('${i.id}', this)">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <path d="M2 6l3 3 5-5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2 6l3 3 5-5" stroke="#1c2408" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
         <div>
