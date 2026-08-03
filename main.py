@@ -53,7 +53,10 @@ BOT_COMMANDS = [
 # client_risk_check навмисно виключений — це радше рефлексія, а не лайфхак, туди CTA виглядає недоречно.
 EXPERT_TYPES = {"value_tip", "ai_dev"}
 
-TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram: t.me/hodakov_digital"
+# Без прямого посилання t.me/... в тілі поста навмисно — Threads (як і Instagram) занижує
+# охоплення постів із зовнішніми посиланнями в тексті. Посилання лишається тільки в профілі,
+# тут просто натяк шукати деталі в Telegram.
+TELEGRAM_CTA = "\n\nРозписую детальніше в Telegram — посилання в профілі."
 
 # ===== ПОШУК ЛІДІВ І САМОРЕКЛАМИ (обхід через Google, поки нема App Review Meta) =====
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")

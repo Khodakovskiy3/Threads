@@ -1389,24 +1389,37 @@ let postsCache = null;
 
 async function loadPosts() {
   const el = document.getElementById('posts');
-  if (!postsCache) {
-    el.innerHTML = loader();
-    try {
-      const res = await fetch(withToken('/api/posts'));
-      if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
-      const data = await res.json();
-      const threads = Array.isArray(data.threads) ? data.threads : [];
-      const telegram = Array.isArray(data.telegram) ? data.telegram : [];
-      postsCache = [
-        ...threads.map(p => ({...p, platform: 'threads'})),
-        ...telegram.map(p => ({...p, platform: 'telegram'}))
-      ];
-    } catch (err) {
-      el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
-      return;
-    }
+  // ВАЖЛИВО: раніше тут був `if (!postsCache)` — тобто дані підтягувались з сервера лише
+  // ОДИН раз за весь час життя вкладки браузера, а перемикання між розділами сайту й назад
+  // просто показувало той самий застарілий кеш. Якщо вкладка сайту лежить відкритою (закріплена
+  // в браузері) днями — саме тому здавалось що "нові пости не з'являються", хоча бот публікував
+  // нормально. Тепер кожне відкриття розділу "Пости" тягне свіжі дані з сервера заново; сортування
+  // й фільтр (onchange) далі просто перемальовують уже завантажений список, без зайвого запиту.
+  el.innerHTML = loader();
+  try {
+    const res = await fetch(withToken('/api/posts'));
+    if (!res.ok) { el.innerHTML = empty('⚠️', 'Помилка API ' + res.status); return; }
+    const data = await res.json();
+    const threads = Array.isArray(data.threads) ? data.threads : [];
+    const telegram = Array.isArray(data.telegram) ? data.telegram : [];
+    postsCache = [
+      ...threads.map(p => ({...p, platform: 'threads'})),
+      ...telegram.map(p => ({...p, platform: 'telegram'}))
+    ];
+  } catch (err) {
+    el.innerHTML = empty('⚠️', 'Помилка: ' + err.message);
+    return;
   }
   renderPosts();
+}
+
+async function refreshPosts(btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Оновлюю...';
+  await loadPosts();
+  btn.disabled = false;
+  btn.textContent = original;
 }
 
 function postsControlsBar(sortBy, filterBy) {
@@ -1426,6 +1439,7 @@ function postsControlsBar(sortBy, filterBy) {
       ${fOpt('bot', 'Тільки бот')}
       ${fOpt('manual', 'Тільки особисті')}
     </select>
+    <button class="btn btn-secondary btn-sm" style="margin:0" onclick="refreshPosts(this)">↻ Оновити</button>
   </div>`;
 }
 
